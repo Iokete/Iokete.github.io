@@ -144,8 +144,8 @@ def set_favorite(idx: int, set=True):
     1. Send the magic words at the start of the main function: `Alohomora`
     2. Allocate a small chunk, we need to leave space for a second chunk in the 0x200 region of the heap (we will see why after).
     3. Free the first one -> `free(spells[0])`
-    4. Update magic numbers with 0 as our input, so we overwrite the first byte of spells[1] with a null byte, making it point to 0x200, instead of 0x2a0 like it was initially.
-    5. Set spells[1] (now pointing to 0x200, with size = 0x100) as our favorite spell, and use `read_spell()` to read 0xf8 bytes from 0x200. This way we can leak the heap base address by reading the first quadword of the spells[0] chunk, this will have the first 5 bytes of the address. This is what we call the **heap key**, we will explain later what is it, but for now its enough to know that it is the first 5 bytes of the heap address. With this leak we can now free any heap address of our choice. 
+    4. Update magic numbers with 0 as our input, so we overwrite the first byte of `spells[1]` with a null byte, making it point to 0x200, instead of 0x2a0 like it was initially.
+    5. Set `spells[1]` (now pointing to 0x200, with size = 0x100) as our favorite spell, and use `read_spell()` to read 0xf8 bytes from 0x200. This way we can leak the heap base address by reading the first quadword of the `spells[0]` chunk, this will have the first 5 bytes of the address. This is what we will call the **heap key**, we will explain later what this is, but for now its enough to know that it is the first 5 bytes of the heap address. With this leak we can now free any heap address of our choice. 
 
 - When we allocate both spells the heap looks like this:
 
