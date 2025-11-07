@@ -1,15 +1,14 @@
-title: Moonwalk
-author: Abhinav Saxena
-url: https://www.abhinavsaxena.com/moonwalk # root address of the site
+title: "0x5010"
+author: Jorge Moreno
+url: https://iokete.github.io # root address of the site
 description: > # description of the site (multiple lines allowed)
-  Moonwalk is a fast and elegant Jekyll theme with a clean dark mode. It comes with horizontal list (for navbar and footer), card list (for portfolio), and a generic vertical list. It is very easy to modify in case you want to build over it - please see _layouts/home.html to do that.
-
+  Hello! I’m Jorge Moreno Cano, a Cybersecurity Engineering student specializing in binary and system exploitation. In this blog I will share everything I learn along the way, as well as writeups to challenges I face or new techniques I acquire knowledge of.
 permalink: /:slug
 
-favicon: "./logo.png" # relative path to site's favicon
-
+favicon: "./favicon.ico" # relative path to site's favicon
+did_you_mean: false
 twitter:
-    username: abhinav # update or delete this
+    username: lkt # update or delete this
     card: summary_large_image
 
 #theme: moonwalk # if you are using GitHub Pages, change it to remote_theme: abhinavs/moonwalk
@@ -17,7 +16,7 @@ remote_theme: abhinavs/moonwalk
 
 theme_config:
   appearance: "dark" # can be "light", "dark" or "auto"
-  appearance_toggle: true # if appearance can be switched by user
+  appearance_toggle: false # if appearance can be switched by user
   back_home_text: "home.." # customize text for homepage link in post layout
   date_format: "%Y-%m-%d" # customize how date is formatted
   show_description: true # show blog description
@@ -27,19 +26,16 @@ theme_config:
   # following keys are using to create home layout
   show_projects: true # show projects as cards, add in _data/home.yml
   show_blog: true # show blog posts added in _posts
-  show_old_projects: true # show old projects as cards, add in _data/home.yml
+  show_old_projects: false # show old projects as cards, add in _data/home.yml
   show_misc_list: false # show generic vertical list for misc details, add _data/home.yml
   show_reading_time: true # show number of words and reading time in the blog posts
   show_tags: true # show tags in a blog posts
   # options for "home" page
   home:
-    title_projects: Portfolio
+    title_projects: "Last Posts"
     title_misc_list: Details
     title_blog: Blog
     title_old_projects: Old Projects
-
-soopr:
-  publish_token: "" # sign up at https://www.soopr.co to get your publish token and personalize share and reaction options
 
 highlighter: rouge
 
