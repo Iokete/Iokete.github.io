@@ -1,8 +1,10 @@
-name: Build and deploy Zola website
+name: Deploy Zola Site to GitHub Pages
+
 on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -10,30 +12,54 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: pages
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout
-        uses: actions/checkout@v6.0.1
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Prepare Zola config
-        run: cp zola.toml config.toml
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
-      - name: Build Zola + upload Pages artifact
-        uses: getzola/github-pages@066755243e69f508fd1a74739fbf1a65f656c790
+      - name: Install Zola
+        uses: taiki-e/install-action@v2
         with:
-          zola_version: v0.22.0
+          tool: zola
+
+      - name: Preserve repository assets
+        shell: bash
+        run: |
+          if [ -d public/assets ]; then
+            mkdir -p /tmp/zola-assets
+            cp -a public/assets/. /tmp/zola-assets/
+          fi
+
+      - name: Build with Zola
+        run: zola build
+
+      - name: Restore preserved assets into output
+        shell: bash
+        run: |
+          if [ -d /tmp/zola-assets ]; then
+            mkdir -p public/assets
+            cp -a /tmp/zola-assets/. public/assets/
+          fi
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
 
   deploy:
-    runs-on: ubuntu-latest
-    needs: build
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
