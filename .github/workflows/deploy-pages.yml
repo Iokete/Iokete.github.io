@@ -50,6 +50,10 @@ jobs:
             cp -a /tmp/zola-assets/. public/assets/
           fi
 
+      - name: Create .nojekyll to disable Jekyll processing
+        shell: bash
+        run: touch public/.nojekyll
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
