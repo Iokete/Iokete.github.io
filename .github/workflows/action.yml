@@ -33,9 +33,9 @@ jobs:
       - name: Preserve repository assets
         shell: bash
         run: |
-          if [ -d public/assets ]; then
+          if [ -d static/assets ]; then
             mkdir -p /tmp/zola-assets
-            cp -a public/assets/. /tmp/zola-assets/
+            cp -a static/assets/. /tmp/zola-assets/
           fi
 
       - name: Build with Zola
