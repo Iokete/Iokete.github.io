@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TheGrue2: GamePwn challenge creation walkthrough (ES) - lkt</title>
+    
+    
+    
+    <meta name="keywords" content="gamepwn, unity, HackOn2026">
+    
+    
+    <link rel="canonical" href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;thegrue2&#x2F;" />
+    
+    <link rel="stylesheet" href="https://iokete.github.io/style.css">
+    
+  </head>
+  <body class="theme-tokyonight">
+    
+    <header>
+      <nav>
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;">/home/</a>
+
+        
+        
+        
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;">&#x2F;blog&#x2F;</a>
+        
+
+        
+        
+      </nav>
+    </header>
+    <hr>
+    <main>
+      
+<section>
+  <h1>TheGrue2: GamePwn challenge creation walkthrough (ES)</h1>
+  
+  <p>published: <time>2026-03-03</time></p>
+  
+  
+  <p class="tags">
+  tags: [
+  
+  <a href="https://iokete.github.io/tags/gamepwn/">#gamepwn</a>, 
+  
+  <a href="https://iokete.github.io/tags/unity/">#unity</a>, 
+  
+  <a href="https://iokete.github.io/tags/hackon2026/">#HackOn2026</a>
+  
+  ]
+  </p>
+  
+  <div>
+    <p>El pasado fin de semana del 21 de febrero, tuvo lugar por fin la competición CTF de la HackOn. Un evento que muchos de nosotros esperamos activamente cada año, ya que es un momento en el que se junta toda la comunidad española para pegarse por el podio. Este año tuve la oportunidad de crear retos en la categoría de <strong>pwn</strong> y en la categoría de <strong>misc</strong>. Los últimos años ha sido siempre un evento con mucha calidad y mucho nivel en los retos, sabíamos que iban a haber expectativas altas al respecto, así que quisimos ir un paso más allá e innovar un poco más con los retos.</p>
+<p>Mientras yo seguía con los retos de <strong>pwn</strong>, Znati creó <a rel="external" href="https://znatii.github.io/posts/thegrue/">TheGrue</a>, un reto de <strong>GamePwn</strong> en Unity 2D. Lo probé y me encantó, así que hablé con él para hacer una secuela que siguiese con la misma temática.
+<a rel="external" href="https://znatii.github.io/posts/thegrue/">TheGrue</a> fue un reto que consistía en modificar el ID de un elemento del juego a la hora de realizar una transacción, para acceder a un objeto para el cual no teníamos acceso previamente, y así conseguir la flag. Este reto estaba ambientado en la Universidad Rey Juan Carlos, con referencias hacia compañeros, aulas, e incluso el típico Pacman de la entrada del Aulario I. Recomiendo ir al blog de <strong>znatii</strong>, para ver el writeup detallado.</p>
+<p>Una vez empezamos a pensar el reto, se nos ocurrió esta vez hacerlo en 3D. Esto, a dos semanas de empezar el CTF, iba a ser bastante trabajo teniendo en cuenta nuestra experiencia desarrollando videojuegos (ninguna). Se me ocurrió avisar a <a rel="external" href="https://www.linkedin.com/in/oscar-freire-lojo/">Dogenati</a>, que después de explicarle lo que es la HackOn, el CTF y la idea que teníamos, nos apoyó sin pensarlo. Él nos sugirió, dado el poco tiempo que teníamos, crear un juego con estilo <strong>low poly</strong> utilizando como texturas imágenes reales de los edificios y los personajes como se hacía antiguamente en muchos juegos de PS1.</p>
+<p><img src="/assets/thegrue2/harrypotter.png" alt="alt text" /></p>
+<p><em>Harry Potter en PS1 (ejemplo de low poly)</em></p>
+<h2 id="primer-prototipo">Primer prototipo</h2>
+<p>Aún no sabíamos cuál iba a ser la vulnerabilidad, cuál iba a ser el objetivo del juego, pero sabíamos que tenía que estar ambientado en el campus de Móstoles de la URJC así que a los pocos días Doge ya nos envió el primer prototipo para el mapa.</p>
+<p><img src="/assets/thegrue2/mapa1.png" alt="alt text" /></p>
+<p>Mientras tanto, seguíamos jugando con Unity para sacar adelante un script de movimiento para el personaje.</p>
+<p><img src="/assets/thegrue2/videomovement.gif" alt="alt text" /></p>
+<p>Para todo el proceso, ha sido muy útil el trabajo de <a rel="external" href="https://www.youtube.com/@Brackeys">Brackeys</a>, especialmente a la hora de crear los <a rel="external" href="https://www.youtube.com/watch?v=_nRzoTzeyxU">diálogos</a>.</p>
+<h2 id="primera-fase-de-la-explotacion">Primera fase de la explotación</h2>
+<p>En cuanto a la idea, finalmente optamos por hacer un reto cuya explotación tuviese <strong>2 fases</strong>. En otros CTF se ha visto muchas veces la dinámica de recoger monedas y modificar la puntuación, o atravesar paredes. Santi pudo asistir a la charla de <a rel="external" href="https://www.linkedin.com/in/alexsoleralvarez/">Alex Soler</a> en la hc0n 2026, donde se hablaba de reversing de juegos mediante el uso de r2frida. Allí se modificaba la gravedad del mundo para poder acceder a lugares que no estaban inicialmente preparados para ello. Nuestra primera vulnerabilidad se basó en este principio, sólo que nosotros no utilizamos r2frida, sino que lo creamos para hacerlo con Cheat Engine como en muchos otros retos de la categoría. Para ello, la idea sería crear una entrada en la azotea a lo que tendría que ser el Aulario, y pistas alrededor del mapa que dieran a entender que deben subir al tejado.</p>
+<p>Para el momento en el que nosotros ya habíamos terminado de programar el diálogo y el sistema de NPCs, Doge nos pudo enviar el mapa final con las texturas. Nosotros previamente le habíamos enviado fotos reales de la Universidad para poder hacerlo lo más realista posible, el resultado, a nuestro parecer, fue perfecto. En cuanto nos quisimos dar cuenta teníamos un mapa funcional de la URJC que tanto habíamos visto.</p>
+<p><img src="/assets/thegrue2/uni.png" alt="alt text" /></p>
+<p>Ya con este mapa, nos pusimos manos a la obra con la funcionalidad importante para el propio reto. En la azotea del Aulario I, vemos una puerta que sería la que nos deja acceder al interior, pero cuando intentamos interactuar con ella para entrar aparece un diálogo que nos informa del porqué no podemos acceder aún.</p>
+<p><img src="/assets/thegrue2/puerta.png" alt="alt text" />
+<img src="/assets/thegrue2/dialogopuerta.png" alt="alt text" /></p>
+<h2 id="segunda-y-ultima-fase-de-la-explotacion">Segunda y última fase de la explotación</h2>
+<p>Nos podemos imaginar cuál es la segunda parte del reto, conseguir la cantidad de monedas necesaria para poder abrir la puerta. Pero antes, tenemos que crear la escena en Unity con la flag, así como las propias monedas. Para las coins simplemente decidimos poner el logo de la HackOn con una animación simple hecha con la librería <strong>DOTween</strong> para dar un efecto 3D a una imagen 2D, de forma que la moneda siempre estuviese mirando hacia el personaje. Con esto, llenamos el mapa con aproximadamente 23 HackOins a lo largo de todo el campus. Siendo el total de monedas a recoger 50, el jugador tendría que parchear de alguna forma el juego para poder llegar al requerimiento.</p>
+<p>Para ayudar al jugador, se distribuyeron distintos NPCs a lo largo del mapa. Éstos, tenían diálogos concretos que daban pistas sobre lo que había que hacer o hacia dónde había que dirigirse para avanzar en el reto.</p>
+<p><img src="/assets/thegrue2/monedagif.gif" alt="alt text" /></p>
+<h2 id="flag-y-detalles">Flag y detalles</h2>
+<p>La escena para la flag fue la escena predeterminada de un interior en Unity, añadiendo paredes en un pasillo y aplicándole como textura la imagen que aparecía cuando te comía The Grue en el primer reto. Para obtener la flag había que hablar con <strong>Deoxys</strong>, haciendo un guiño a otro reto de la misma categoría durante el CTF. Además también se encontraba el NPC de <strong>Dr3y</strong>, igual que en TheGrue.</p>
+<p><img src="/assets/thegrue2/escenawin.png" alt="alt text" /></p>
+<p>Con toda la funcionalidad creada, Doge nos brindó finalmente el modelo para los NPC. Con un total de 6 personajes creados con fotos nuestras, teníamos el juego terminado. Se añadieron los últimos detalles: referencias a la universidad, el logo de la HackOn, el logo de la asociación SeekNHack de la propia URJC, un menú principal... y por fin, teníamos un reto funcional completado y listo para subirse a la plataforma de la competición.</p>
+<p><img src="/assets/thegrue2/banda.png" alt="alt text" /></p>
+<h2 id="solucion-no-intencionada-y-anticheat">Solución no intencionada y AntiCheat</h2>
+<p>Para la solución intencionada nuestra idea era que el jugador modificase la instrucción en memoria de la función <code>AddCoin</code>, para que a la hora de sumar las monedas en lugar de ejecutarse <code>score += 1</code>, se ejecutase <code>score += 50</code>. De esta forma se podría llegar al requerimiento de manera sencilla. Para esto, había que proteger de alguna forma la propia puntuación del jugador, para que no pudiese ser alterada. Se utilizó GUPS AntiCheat, que nos brinda un tipo de dato nuevo: <code>ProtectedInt32</code>, que será un entero que está encriptado en memoria para que su modificación no sea posible.</p>
+<p><img src="/assets/thegrue2/dissect.png" alt="alt text" /></p>
+<p>Si la instrucción <code>mov edx,00000001</code> la modificamos por <code>mov edx,00000020</code>, cada vez que obtengamos una moneda, nuestra puntuación aumentará 32 puntos más (20 en hexadecimal). Rápidamente vemos nuestro score aumentar de esta forma.</p>
+<p><img src="/assets/thegrue2/score.png" alt="alt text" /></p>
+<p>Por supuesto, al estar la propia flag dentro de un diálogo, me preocupé en que se mantuviese encriptada. Por suerte, GUPS AntiCheat tiene el tipo de dato <code>ProtectedString</code> que nos permitiría mantener la flag oculta en memoria. El problema viene cuando los diálogos se modifican (por comodidad) desde el Inspector de Unity (la pestaña de la derecha).</p>
+<p><img src="/assets/thegrue2/dialogodeoxys.png" alt="alt text" /></p>
+<p>Cuando el tipo de dato no es <code>String</code>, Unity no deja modificarlos desde el Inspector. Yo quería seguir haciéndolo de esta forma, así que se (vibe)implementó un sistema que convertiría la cadena a <code>ProtectedString</code>, de esta forma podíamos modificarlo desde el Inspector pero a la hora de guardarse en memoria estaría seguro. O eso pensé yo, la realidad es que aunque se convierta, ha estado como tipo <code>string</code> en algún momento, y eso no iba a desaparecer de la memoria del programa. Por lo tanto, una solución que había para este reto (aunque por suerte no mucha gente lo encontró), era dumpear todas las strings del juego <code>strings -a TheGrue2/*</code>. La flag aparecía en el archivo <code>level2</code> (la escena final).</p>
+<p><img src="/assets/thegrue2/strings.png" alt="alt text" /></p>
+<p>Pese a todo, yo personalmente quedé muy satisfecho y muy contento con el trabajo que habíamos hecho y con todo lo que he aprendido gracias a esta oportunidad.</p>
+<h2 id="autores">Autores</h2>
+<ul>
+<li>Dogenati (Óscar Freire): <a rel="external" href="https://www.linkedin.com/in/oscar-freire-lojo/">https://www.linkedin.com/in/oscar-freire-lojo/</a></li>
+<li>Znati (Santiago Tovar): <a rel="external" href="https://www.linkedin.com/in/santiago-tovar-velasco/">https://www.linkedin.com/in/santiago-tovar-velasco/</a></li>
+<li>lkt (Jorge Moreno): <a rel="external" href="https://www.linkedin.com/in/mcjorgee0/">https://www.linkedin.com/in/mcjorgee0/</a></li>
+</ul>
+<p>Archivos del reto: <a href="/assets/thegrue2/thegrue2.zip">thegrue2.zip</a></p>
+<p><img src="/assets/thegrue2/final.png" alt="alt text" /></p>
+
+  </div>
+</section>
+
+    </main>
+    <hr>
+    <footer>
+      <p>© 2026 Jorge Moreno Cano. Powered by <a href="https://www.getzola.org/">Zola</a>, you can download the theme <a href="https://github.com/mxaddict/zolanight">here</a></p>
+    </footer>
+  </body>
+</html>

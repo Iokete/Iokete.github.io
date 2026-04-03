@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PatriotCTF2026 Switchboard - use-after-free in kmalloc-cg-32 with CONFIG_SLAB_FREELIST_HARDENED - lkt</title>
+    
+    
+    
+    <meta name="keywords" content="kernel">
+    
+    
+    <link rel="canonical" href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;switchboard&#x2F;" />
+    
+    <link rel="stylesheet" href="https://iokete.github.io/style.css">
+    
+  </head>
+  <body class="theme-tokyonight">
+    
+    <header>
+      <nav>
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;">/home/</a>
+
+        
+        
+        
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;">&#x2F;blog&#x2F;</a>
+        
+
+        
+        
+      </nav>
+    </header>
+    <hr>
+    <main>
+      
+<section>
+  <h1>PatriotCTF2026 Switchboard - use-after-free in kmalloc-cg-32 with CONFIG_SLAB_FREELIST_HARDENED</h1>
+  
+  <p>published: <time>2025-12-26</time></p>
+  
+  
+  <p class="tags">
+  tags: [
+  
+  <a href="https://iokete.github.io/tags/kernel/">#kernel</a>
+  
+  ]
+  </p>
+  
+  <div>
+    <h2 id="tl-dr">TL;DR</h2>
+<p>kUAF and double-free in <code>kmalloc-cg-32</code> without <code>CONFIG_SLAB_FREELIST_HARDENED</code></p>
+<h2 id="challenge-description">Challenge Description</h2>
+<blockquote>
+<p>Your standard SLAB notetaking app!</p>
+</blockquote>
+<p>Category: <strong>pwn</strong></p>
+<h2 id="exploitation">Exploitation</h2>
+<h3 id="analyzing-the-source-code">Analyzing the source code</h3>
+<p>For this challenge we are provided with the source code <a href="/assets/switchboard/switchboard.c">switchboard.c</a> that implements a switchboard kernel module, with different device management operations. It uses the <code>switch_device</code> struct:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> switch_device </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #94E2D5;"> *</span><span>buf</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    void</span><span style="color: #94E2D5;"> *</span><span>head</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> *</span><span>tail</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> *</span><span>seek</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    int</span><span> len</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    uint8_t</span><span> inuse</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    uint8_t</span><span> freed</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    unsigned long</span><span> t_settings</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span></code></pre>
+<p>Device operations:</p>
+<ul>
+<li><code>obj_new</code>: Creates a new switch_device object, allocates a 32-byte buffer, initializes all pointers to the buffer start, sets <code>inuse=1</code>, and adds it to the global list.</li>
+<li><code>obj_select</code>: Selects a device by index from the device list.</li>
+<li><code>rx_handle</code>: <code>copy_from_user</code> handler. If the device <code>inuse==0</code>, it allocates a new 32-byte buffer first.</li>
+<li><code>tx_handle</code>: <code>copy_to_user</code> handler. Uses <code>dev-&gt;t_settings</code> for retransmission.</li>
+<li><code>buf_reset</code>: Sets seek=head and marks device as not in use (inuse=0). If already not in use, frees the buffer memory.</li>
+<li><code>n_set</code>: Sets the maximum data length for the selected device's buffer, stored in <code>dev-&gt;len</code>.</li>
+<li><code>settings</code>: Configures transmission settings for the selected device. The t_settings field uses bit 0 to control retransmission behavior in tx_handle.</li>
+</ul>
+<p>There are two major issues in the module, after freeing a specific node reseting its buffer with <code>buf_reset</code>, the pointer is not cleared, leading to a use-after-free vulnerability. This is critical considering that there are no modern protections such as <code>CONFIG_SLAB_FREELIST_HARDENED</code>, that prevent the tampering of slab freelists. Added to this, the r/w handlers do not check if the object is freed. The other problem is at <code>buf_reset</code>, where after freeing a node we set <code>dev-&gt;freed = 1</code>, but there are no checks that use this field so we can infinitely free a chunk.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">static long</span><span style="color: #89B4FA;font-style: italic;"> buf_reset</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">unsigned long</span><span style="color: #EBA0AC;font-style: italic;"> arg</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    struct</span><span> switch_device </span><span style="color: #94E2D5;">*</span><span>dev </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> get</span><span style="color: #9399B2;">(</span><span>selected</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    if</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">!</span><span>dev</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">        return</span><span style="color: #94E2D5;"> -</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    if</span><span style="color: #9399B2;">(</span><span>dev</span><span style="color: #9399B2;">-&gt;</span><span>inuse</span><span style="color: #94E2D5;"> ==</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">){</span><span style="color: #9399B2;font-style: italic;"> // &lt;- There are no checks to see if it is already freed</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">        kfree</span><span style="color: #9399B2;">(</span><span>dev</span><span style="color: #9399B2;">-&gt;</span><span>buf</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span>        dev</span><span style="color: #9399B2;">-&gt;</span><span>freed</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;"> 1</span><span style="color: #9399B2;">;</span><span style="color: #9399B2;font-style: italic;"> // Set freed to 1</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">        return</span><span style="color: #FAB387;"> 1</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">    }</span></span>
+<span class="giallo-l"><span>    dev</span><span style="color: #9399B2;">-&gt;</span><span>seek</span><span style="color: #94E2D5;"> =</span><span> dev</span><span style="color: #9399B2;">-&gt;</span><span>head</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>    dev</span><span style="color: #9399B2;">-&gt;</span><span>inuse</span><span style="color: #94E2D5;"> =</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    return</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span></code></pre><h3 id="exploiting-the-vulnerability">Exploiting the vulnerability</h3>
+<p>With this information we know that we can achieve a write-what-where primitive in the kernel, but to achieve root in the VM we need to leak kernel base address. To do this we are going to take advantage of <code>seq_operations</code> object.</p>
+<p>We know that the allocation that is happening in the module is of size <code>BUF_SIZE</code>: <code>dev-&gt;buf = kzalloc(BUF_SIZE, GFP_KERNEL_ACCOUNT)</code>, so we know the object ends getting placed in a <code>kmalloc-cg-32</code> slab. In the linux kernel, caches are shared across the system, so we can abuse this fact by allocating an object that we know that contains kernel pointers and read them using our kUAF to leak kernel addresses.</p>
+<p>The <code>seq_operations</code> object is placed inside <code>kmalloc-cg-32</code> when opening the file <code>/proc/self/stat</code> and it is freed when closed. This object is often used to achieve RIP control by overwriting one of its pointers with an arbitrary address, but in our case we will only leak kernel base using the first pointer in the structure. More info <a rel="external" href="https://ptr-yudai.hatenablog.com/entry/2020/03/16/165628#seq_operations">here</a>.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> seq_operations </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	void</span><span style="color: #94E2D5;"> *</span><span style="color: #9399B2;"> (</span><span style="color: #94E2D5;">*</span><span>start</span><span style="color: #9399B2;">) (</span><span style="color: #CBA6F7;">struct</span><span> seq_file </span><span style="color: #94E2D5;">*</span><span>m</span><span style="color: #9399B2;">,</span><span style="color: #F9E2AF;font-style: italic;"> loff_t</span><span style="color: #94E2D5;"> *</span><span>pos</span><span style="color: #9399B2;">);</span><span style="color: #9399B2;font-style: italic;"> // &lt;- We will read this one and calculate the offset to kernel base</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	void</span><span style="color: #9399B2;"> (</span><span style="color: #94E2D5;">*</span><span>stop</span><span style="color: #9399B2;">) (</span><span style="color: #CBA6F7;">struct</span><span> seq_file </span><span style="color: #94E2D5;">*</span><span>m</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> void</span><span style="color: #94E2D5;"> *</span><span>v</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	void</span><span style="color: #94E2D5;"> *</span><span style="color: #9399B2;"> (</span><span style="color: #94E2D5;">*</span><span>next</span><span style="color: #9399B2;">) (</span><span style="color: #CBA6F7;">struct</span><span> seq_file </span><span style="color: #94E2D5;">*</span><span>m</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> void</span><span style="color: #94E2D5;"> *</span><span>v</span><span style="color: #9399B2;">,</span><span style="color: #F9E2AF;font-style: italic;"> loff_t</span><span style="color: #94E2D5;"> *</span><span>pos</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">	int</span><span style="color: #9399B2;"> (</span><span style="color: #94E2D5;">*</span><span>show</span><span style="color: #9399B2;">) (</span><span style="color: #CBA6F7;">struct</span><span> seq_file </span><span style="color: #94E2D5;">*</span><span>m</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> void</span><span style="color: #94E2D5;"> *</span><span>v</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">};</span></span></code></pre>
+<p>Knowing this we can follow the next approach to leak kernel pointers:</p>
+<ol>
+<li>Double free a device object. <strong>After double-freeing an object the freelist gets tampered and gets stuck in an infinite loop, so we know that our next object will be 100% allocated here</strong>.</li>
+<li>Allocate a device (we do this first because it is using <code>kzalloc</code> to zero out previous content)</li>
+<li>Because it is freed again, we can place <code>seq_operations</code> inside by calling <code>open("/proc/self/stat")</code></li>
+<li>Read from the device to get leaks</li>
+</ol>
+<p>After getting leaks we can just free twice again an object and write over its next pointer to allocate wherever we want right? There is a problem, when creating an object we allocate <strong>twice</strong> in kmalloc-cg-32, this is because in the <code>obj_new</code> function we allocate once for <code>dev-&gt;buf</code> (the one we are interested in), and it calls <code>add()</code> to add the created device to the linked list. This last function allocates a <code>struct devices</code> object that is an entry in the linked list, so it has 3 pointers (24 bytes), and gets allocated in the same cache.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">typedef struct</span><span> devices </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    struct</span><span> switch_device</span><span style="color: #94E2D5;">*</span><span> device</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    struct</span><span> devices</span><span style="color: #94E2D5;">*</span><span> next</span><span style="color: #9399B2;">,</span><span style="color: #94E2D5;"> *</span><span>prev</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span><span> devices</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">static ssize_t</span><span style="color: #89B4FA;font-style: italic;"> add</span><span style="color: #9399B2;">(</span><span style="color: #CBA6F7;">struct</span><span> switch_device</span><span style="color: #94E2D5;">*</span><span style="color: #EBA0AC;font-style: italic;"> dev</span><span style="color: #9399B2;">){</span></span>
+<span class="giallo-l"><span>    devices </span><span style="color: #94E2D5;">*</span><span> node </span><span style="color: #94E2D5;">=</span><span> head</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>    devices </span><span style="color: #94E2D5;">*</span><span> newdev </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> kzalloc</span><span style="color: #9399B2;">(</span><span style="color: #94E2D5;">sizeof</span><span style="color: #9399B2;">(</span><span>devices</span><span style="color: #9399B2;">),</span><span> GFP_KERNEL_ACCOUNT</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span>    ...</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>For this reason, we will create an additional object on index 1 before leaking, and we will free it after tampering the free list, to place it on top of the list.</p>
+<p>One way of achieving root execution with an arbitrary write primitive in the kernel, is overwriting the <code>modprobe_path</code> global variable. It usually contains a string <code>/sbin/modprobe</code>, that is a binary that gets executed whenever the kernel does not recognize the magic bytes of a file. If we overwrite this string with a custom shell script, and try to execute an unknown file (for example, one that starts with 4 0xff bytes), our shell script will get executed as root.</p>
+<h3 id="achieve-lpe-from-the-powerful-primitive">Achieve LPE from the powerful primitive</h3>
+<p>The final path for the exploitation is:</p>
+<ul>
+<li>Double free the object 0</li>
+<li>Write into its next pointer the address of <code>modprobe_path</code></li>
+<li>Free once the object 1, our free list now is <code>modprobe_path</code> &lt;- <code>node0</code> &lt;- <code>node1</code>.</li>
+<li>Create a new object to allocate node1, and node2</li>
+<li>Call the write handler to allocate and write into <code>modprobe_path</code></li>
+<li>Create the shell script, and the dummy file, execute it and read the flag.</li>
+</ul>
+<p>I added some <code>usleep</code> calls in the exploit because it was not consistently getting the flag, I thought it was because of timing issues.</p>
+<h3 id="getting-the-flag">Getting the flag</h3>
+<p><img src="/assets/switchboard/flag.gif" alt="flag" /></p>
+<h3 id="solvers">Solvers</h3>
+<p>You can find the solver <a href="/assets/switchboard/solver.c">here</a>.</p>
+
+  </div>
+</section>
+
+    </main>
+    <hr>
+    <footer>
+      <p>© 2026 Jorge Moreno Cano. Powered by <a href="https://www.getzola.org/">Zola</a>, you can download the theme <a href="https://github.com/mxaddict/zolanight">here</a></p>
+    </footer>
+  </body>
+</html>
