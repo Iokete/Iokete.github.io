@@ -45,8 +45,8 @@ jobs:
         shell: bash
         run: |
           if [ -d /tmp/zola-assets ]; then
-            mkdir -p public/assets
-            cp -a /tmp/zola-assets/. public/assets/
+            mkdir -p static/assets
+            cp -a /tmp/zola-assets/. static/assets/
           fi
 
       - name: Upload Pages artifact
