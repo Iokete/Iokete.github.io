@@ -1,57 +1,92 @@
-name: Deploy Zola Site to GitHub Pages
+name: Deploy Zola site to GitHub Pages
 
 on:
-  push:
-    branches:
-      - master
-  workflow_dispatch:
+	push:
+		branches:
+			- master
+		paths:
+			- content/**
+			- sass/**
+			- static/**
+			- templates/**
+			- themes/**
+			- zola.toml
+			- .github/workflows/deploy-pages.yml
+			- public/assets/**
+	workflow_dispatch:
 
 permissions:
-  contents: write
+	contents: read
+	pages: write
+	id-token: write
 
 concurrency:
-  group: gh-pages
-  cancel-in-progress: true
+	group: pages
+	cancel-in-progress: true
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+	build:
+		runs-on: ubuntu-latest
+		steps:
+			- name: Checkout repository
+				uses: actions/checkout@v4
+				with:
+					submodules: recursive
+					fetch-depth: 0
 
-      - name: Install Zola
-        uses: taiki-e/install-action@v2
-        with:
-          tool: zola
+			- name: Install Rust toolchain
+				uses: dtolnay/rust-toolchain@stable
 
-      - name: Preserve repository assets
-        shell: bash
-        run: |
-          if [ -d public/assets ]; then
-            mkdir -p /tmp/zola-assets
-            cp -a public/assets/. /tmp/zola-assets/
-          fi
+			- name: Install Zola
+				run: cargo install zola --locked
 
-      - name: Build site
-        run: zola build --base-url https://iokete.github.io/
+			- name: Preserve checked-in assets
+				run: |
+					set -euo pipefail
+					backup_dir="$(mktemp -d)"
+					if [ -d public/assets ]; then
+						mkdir -p "$backup_dir/public"
+						cp -a public/assets "$backup_dir/public/"
+					fi
+					if [ -f CNAME ]; then
+						cp CNAME "$backup_dir/CNAME"
+					fi
+					echo "BACKUP_DIR=$backup_dir" >> "$GITHUB_ENV"
 
-      - name: Restore preserved assets into output
-        shell: bash
-        run: |
-          if [ -d /tmp/zola-assets ]; then
-            mkdir -p public/assets
-            cp -a /tmp/zola-assets/. public/assets/
-          fi
+			- name: Build Zola site
+				run: zola build --output-dir public-build
 
-      - name: Disable Jekyll
-        shell: bash
-        run: touch public/.nojekyll
+			- name: Assemble publish directory
+				run: |
+					set -euo pipefail
+					rm -rf public
+					mkdir -p public
+					cp -a public-build/. public/
 
-      - name: Deploy to gh-pages
-        uses: peaceiris/actions-gh-pages@v4
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./public
-          force_orphan: true
+					if [ -d "$BACKUP_DIR/public/assets" ]; then
+						rm -rf public/assets
+						cp -a "$BACKUP_DIR/public/assets" public/
+					fi
+
+					if [ -f "$BACKUP_DIR/CNAME" ]; then
+						cp "$BACKUP_DIR/CNAME" public/CNAME
+					fi
+
+					touch public/.nojekyll
+
+			- name: Upload GitHub Pages artifact
+				uses: actions/upload-pages-artifact@v3
+				with:
+					path: public
+					include-hidden-files: true
+
+	deploy:
+		needs: build
+		runs-on: ubuntu-latest
+		environment:
+			name: github-pages
+			url: ${{ steps.deployment.outputs.page_url }}
+		steps:
+			- name: Deploy to GitHub Pages
+				id: deployment
+				uses: actions/deploy-pages@v4
