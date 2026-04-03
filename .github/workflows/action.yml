@@ -7,9 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
@@ -22,45 +20,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
       - name: Install Zola
         uses: taiki-e/install-action@v2
         with:
           tool: zola
 
-      - name: Preserve repository assets
-        shell: bash
-        run: |
-          if [ -d static/assets ]; then
-            mkdir -p /tmp/zola-assets
-            cp -a static/assets/. /tmp/zola-assets/
-          fi
-
       - name: Build with Zola
         run: zola build
 
-      - name: Restore preserved assets into output
+      - name: Disable Jekyll processing
         shell: bash
         run: |
-          if [ -d /tmp/zola-assets ]; then
-            mkdir -p static/assets
-            cp -a /tmp/zola-assets/. static/assets/
-          fi
+          touch public/.nojekyll
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: ./public
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: ./public
