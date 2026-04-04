@@ -51,9 +51,9 @@ If we have the following case where `R1 = (0, 2)` and `R2 = 2`, if we compare bo
 
 The new R1 range will be (0, 0), the verifier will think `R1 = 0`, when in reality it can be 0 or 1. This is exactly what we do to exploit this vulnerability, if we create a ``BPF_MAP_TYPE_ARRAY`` and give the eBPF bytecode the value 1, after doing what we described before, we can get a register to hold the value 1, but inside the verifier state, it will think it is 0. This is a big primitive because now we can multiply this scalar register with any value we want and OOB write/read on the kernel heap.
 
-This is my second eBPF challenge, I learnt almost every technique from [extended-eBPF](https://github.com/Iokete/writeups/tree/main/pwn/uoftctf2026/extended-ebpf) challenge from UoftCTF2026. For this challenge, I wanted to take a step forward and learn how to bypass **ALU Sanitation**, a protection that was not enabled in UoftCTF, but it is here.
+This is my second eBPF challenge, I learnt almost every technique from [extended-eBPF](/blog/extended-ebpf) challenge from UoftCTF2026. For this challenge, I wanted to take a step forward and learn how to bypass **ALU Sanitation**, a protection that was not enabled in UoftCTF, but it is here.
 
-I will not cover the basics of eBPF in this writeup, you can refer to [this blog](https://chomp.ie/Blog+Posts/Kernel+Pwning+with+eBPF+-+a+Love+Story) for in-depth explanation, or [my other writeup](https://github.com/Iokete/writeups/tree/main/pwn/uoftctf2026/extended-ebpf) for a quick introduction.
+I will not cover the basics of eBPF in this writeup, you can refer to [this blog](https://chomp.ie/Blog+Posts/Kernel+Pwning+with+eBPF+-+a+Love+Story) for in-depth explanation, or [my other writeup](/blog/extended-ebpf) for a quick introduction.
 
 ### ALU Sanitation
 
@@ -101,7 +101,12 @@ BPF_MOV64_REG(VULN, BPF_REG_5)
 > **Note:** `ERR_CHECK` and `CLEAR_RAX` are user defined macros to exit if the function fails, or to set `BPF_REG_0` to 0.
 
 With our `VULN` register set, we can now setup a `ringbuf` to read from the kernel with `bpf_ringbuf_output`. 
-It is defined like so: `static long (* const bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags)`, it will read from `data` into our `ringbuf` for a length of `size` bytes. We will place there our `VULN` value, multiplied by an arbitrary number.
+It is defined like so: 
+```c 
+static long (* const bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size, __u64 flags)
+```
+
+It will read from `data` into our `ringbuf` for a length of `size` bytes. We will place there our `VULN` value, multiplied by an arbitrary number.
 
 To use this helper, we must set up 3 different memory allocations ([docs](https://docs.ebpf.io/linux/helper-function/bpf_ringbuf_output/)): 
 
@@ -175,7 +180,9 @@ This is, as far as I know, as simple as it can get for ring buffers, because the
 
 Now that we have a leak, we have to make use of our confused register to get a more powerful primitive than OOB. This time we will use `bpf_skb_load_bytes`. This function will load the received bytes (from the socket) into an address of our choice. You can check the documentation [here](https://docs.ebpf.io/linux/helper-function/bpf_skb_load_bytes/). 
 
-`static long (* const bpf_skb_load_bytes)(const void *skb, __u32 offset, void *to, __u32 len)`
+```c
+static long (* const bpf_skb_load_bytes)(const void *skb, __u32 offset, void *to, __u32 len)
+```
 
 The `*skb` pointer is loaded automatically into R1 when starting our bytecode, so we save it at the beginning of our program. ``offset`` is where (in the socket buffer) we have to start copying, `*to` the address to write to and `len` the number of bytes.
 
