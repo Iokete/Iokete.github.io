@@ -1,5 +1,5 @@
 +++
-title = "hxp2025 cassandra-von-hxp - exploiting a buffer overflow in a LM3S6965EVB board | Part 2"
+title = "hxp2025 cassandra-von-hxp: exploiting a buffer overflow in a LM3S6965EVB board | Part 2"
 date = 2025-12-30
 taxonomies = { tags = ["bare metal", "other"] }
 +++

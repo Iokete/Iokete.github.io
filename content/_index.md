@@ -1,5 +1,5 @@
 +++
-title = "lkt"
+title = "lkt · linux security"
 description = "Cybersecurity Engineering & Low Level Security"
 +++
 

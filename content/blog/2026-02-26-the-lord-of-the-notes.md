@@ -1,5 +1,5 @@
 +++
-title = "HackOn2026 The Lord of the Notes - Achieving LPE tricking eBPF verifier & bypassing ALU Sanitation"
+title = "HackOn2026 The Lord of the Notes: Achieving LPE tricking eBPF verifier & bypassing ALU Sanitation"
 date = 2026-02-26
 taxonomies = { tags = ["kernel", "ebpf", "HackOn2026", "techniques"] }
 +++

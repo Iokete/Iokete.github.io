@@ -1,5 +1,5 @@
 +++
-title = "PatriotCTF2026 Switchboard - use-after-free in kmalloc-cg-32 with CONFIG_SLAB_FREELIST_HARDENED"
+title = "Switchboard: use-after-free in kmalloc-cg-32 with CONFIG_SLAB_FREELIST_HARDENED"
 date = 2025-12-26
 taxonomies = { tags = ["kernel"] }
 +++
@@ -8,6 +8,8 @@ taxonomies = { tags = ["kernel"] }
 kUAF and double-free in ``kmalloc-cg-32`` without ``CONFIG_SLAB_FREELIST_HARDENED``
 
 ## Challenge Description
+
+This challenge was part of **PatriotCTF 2025**.
 
 > Your standard SLAB notetaking app!
 

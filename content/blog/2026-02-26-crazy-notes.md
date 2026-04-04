@@ -1,5 +1,5 @@
 +++
-title = "HackOn2026 Crazy Notes - Tampering tcache_perthread_struct metadata to free an arbitrarily big chunk to leak libc, and overwrite TLS destructors to achieve code execution (ES)"
+title = "HackOn2026 Crazy Notes: Tampering tcache_perthread_struct metadata to free an arbitrarily big chunk to leak libc, and overwrite TLS destructors to achieve code execution (ES)"
 date = 2026-02-26
 taxonomies = { tags = ["heap", "HackOn2026"] }
 +++

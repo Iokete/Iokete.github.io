@@ -1,5 +1,5 @@
 +++
-title = "HTB University CTF 2026 - introductory FILE struct exploitation"
+title = "Starshard Core: Introductory FILE struct exploitation"
 date = 2025-12-22
 taxonomies = { tags = ["heap", "file", "techniques"] }
 +++

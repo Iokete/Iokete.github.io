@@ -1,5 +1,5 @@
 +++
-title = "hxp2025 orakel-von-hxp - exploiting a buffer overflow in a LM3S6965EVB board | Part 1"
+title = "hxp2025 orakel-von-hxp: exploiting a buffer overflow in a LM3S6965EVB board | Part 1"
 date = 2025-12-30
 taxonomies = { tags = ["bare metal", "other"] }
 +++

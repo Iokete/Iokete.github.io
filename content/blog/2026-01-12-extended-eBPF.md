@@ -1,5 +1,5 @@
 +++
-title = "UofTCTF2026 extended-eBPF - eBPF exploitation basics"
+title = "UofTCTF2026 extended-eBPF: eBPF exploitation basics"
 date = 2026-02-22
 taxonomies = { tags = ["kernel", "eBPF", "techniques"] }
 +++
