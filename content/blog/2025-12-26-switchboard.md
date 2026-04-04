@@ -1,5 +1,5 @@
 +++
-title = "Switchboard: use-after-free in kmalloc-cg-32 with CONFIG_SLAB_FREELIST_HARDENED"
+title = "Switchboard: abusing uaf and double free in kmalloc-cg-32"
 date = 2025-12-26
 taxonomies = { tags = ["kernel"] }
 +++
